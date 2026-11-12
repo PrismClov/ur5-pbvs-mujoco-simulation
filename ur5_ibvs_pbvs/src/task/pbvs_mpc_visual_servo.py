@@ -1,6 +1,7 @@
 import numpy as np
 
 from src.controllers.pbvs_controller import soften_error_vector
+from src.perception.target_motion import TargetMotionController
 from src.perception.pose_estimator import draw_pose_axes
 from src.task.pbvs_mpc_runtime import (
     build_error_state_world,
@@ -8,7 +9,7 @@ from src.task.pbvs_mpc_runtime import (
     compute_orientation_lock_error_in_camera_frame,
     smooth_error_vector,
 )
-from src.utils.transforms import rvec_tvec_to_transform
+from src.utils.transforms import invert_transform, make_transform, rvec_tvec_to_transform
 
 
 def run_visual_servo_step(
@@ -54,6 +55,7 @@ def run_visual_servo_step(
     actuator_names,
     arm_dof_count,
     target_is_mocap,
+    site_name="attachment_site",
 ):
     success, rvec, tvec = pose_estimator.estimate_pose(
         tag,
@@ -72,6 +74,7 @@ def run_visual_servo_step(
             "phase": None,
             "attached_target_offset_world": None,
             "attached_target_quat": None,
+            "attached_target_pose_site": None,
         }
 
     vis = draw_pose_axes(
@@ -154,14 +157,23 @@ def run_visual_servo_step(
 
     attached_target_offset_world = None
     attached_target_quat = None
+    attached_target_pose_site = None
     if phase == "lift":
+        current_site_pos, current_site_rotation = env.get_site_pose(site_name)
+        target_rotation_world = TargetMotionController.quaternion_to_rotation_matrix(
+            current_target_quat
+        )
+        t_world_site = make_transform(current_site_rotation, current_site_pos)
+        t_world_target = make_transform(target_rotation_world, current_target_pos)
+        attached_target_pose_site = invert_transform(t_world_site) @ t_world_target
+
         if target_is_mocap:
             target_motion.auto_mode = False
             target_motion.manual_pos = current_target_pos.copy()
             target_motion.manual_quat = current_target_quat.copy()
             attached_target_offset_world = current_target_pos - current_site_pos
             attached_target_quat = current_target_quat.copy()
-        grasp_state_machine.start_lift(current_site_pos)
+        grasp_state_machine.start_lift(current_site_pos, current_site_rotation)
     elif phase == "approach" and locked_approach_camera_rotation_world is None:
         locked_approach_camera_rotation_world = camera_rotation_world.copy()
 
@@ -175,4 +187,5 @@ def run_visual_servo_step(
         "phase": phase,
         "attached_target_offset_world": attached_target_offset_world,
         "attached_target_quat": attached_target_quat,
+        "attached_target_pose_site": attached_target_pose_site,
     }

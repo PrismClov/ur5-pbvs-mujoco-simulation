@@ -1,7 +1,8 @@
 import numpy as np
+from pathlib import Path
 
 
-SCENE_XML = "/home/adrian/ur5-pbvs-mujoco-simulation/ur5_ibvs_pbvs/model/scene_with_gripper.xml"
+SCENE_XML = str(Path(__file__).resolve().parent.parent / "model" / "scene_with_gripper.xml")
 CAMERA_NAME = "end_effector_camera"
 GLOBAL_CAMERA_NAME = "global_tracking_camera"
 SITE_NAME = "attachment_site"
@@ -14,7 +15,7 @@ USE_GLOBAL_CAMERA_FOR_SPEED = True
 
 TAG_SIZE = 0.05
 DESIRED_STANDOFF = 0.15
-URDF_PATH = "/home/adrian/models/example-robot-data/robots/ur_description/urdf/ur5_robot.urdf"
+URDF_PATH = str(Path(__file__).resolve().parent.parent / "model" / "ur5e.urdf")
 EE_FRAME_NAME = "tool0"
 PINOCCHIO_Q_SIGNS = np.array([-1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=np.float64)
 PINOCCHIO_EE_OFFSET_LOCAL = np.array(
@@ -26,6 +27,7 @@ GRASP_TO_CAMERA_ROTATION = np.eye(3, dtype=np.float64)
 GRASP_YAW_ABOUT_TAG_NORMAL_RAD = 0.0
 PLACE_BOX_CENTER_WORLD = np.array([-0.60, 0.0, 0.0], dtype=np.float64)
 PLACE_RELEASE_HEIGHT = 0.30
+PLACE_TRANSIT_HEIGHT = 0.46
 
 ACTUATOR_NAMES = [
     "shoulder_pan_vel_init",
@@ -39,8 +41,8 @@ ARM_DOF_COUNT = len(ACTUATOR_NAMES)
 
 POSITION_GAIN = 1.0
 ROTATION_GAIN = 4.0
-MAX_Q_DOT = 2.0
-MAX_TRACKING_Q_DOT = 5.0
+MAX_Q_DOT = 1.4
+MAX_TRACKING_Q_DOT = 2.8
 JACOBIAN_DAMPING = 0.02
 GUI_SLEEP = 0.0
 POSITION_DEADBAND = 0.004
@@ -64,14 +66,15 @@ LOST_TAG_DECAY = 0.92
 BLIND_ATTACH_FRAMES = 3
 HOME_JOINT_KP = 2.0
 HOME_JOINT_TOL = 0.03
-HOME_MAX_Q_DOT = 2.0
+HOME_MAX_Q_DOT = 1.5
 RELEASE_HOLD_FRAMES = 20
-ERROR_SMOOTHING_ALPHA = 0.45
+ERROR_SMOOTHING_ALPHA = 0.28
+JOINT_ACCELERATION_LIMIT = 18.0
 CONVEYOR_ENABLED = True
-CONVEYOR_SPEED = 0.35
+CONVEYOR_SPEED = 0.18
 CONVEYOR_ACTUATOR_NAME = "conveyor_drive"
-MAX_TRANSPORT_Q_DOT = 3.0
-MAX_PLACE_Q_DOT = 4.0
+MAX_TRANSPORT_Q_DOT = 1.8
+MAX_PLACE_Q_DOT = 1.5
 
 R_MJ_CAMERA_FROM_CV_CAMERA = np.diag([1.0, -1.0, -1.0])
 

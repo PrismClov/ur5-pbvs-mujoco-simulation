@@ -1,4 +1,5 @@
 
+import os
 import time
 
 import cv2
@@ -11,6 +12,7 @@ from src.config import (
     BLIND_ATTACH_FRAMES,
     CONVEYOR_ENABLED,
     CONVEYOR_SPEED,
+    DESIRED_STANDOFF,
     ENABLE_GLOBAL_CAMERA_WINDOW,
     ERROR_SMOOTHING_ALPHA,
     GRASP_YAW_ABOUT_TAG_NORMAL_RAD,
@@ -22,6 +24,7 @@ from src.config import (
     HOME_JOINT_KP,
     HOME_JOINT_TOL,
     HOME_MAX_Q_DOT,
+    JOINT_ACCELERATION_LIMIT,
     LOST_TAG_DECAY,
     LOST_TAG_HOLD_FRAMES,
     MAX_PLACE_Q_DOT,
@@ -30,6 +33,7 @@ from src.config import (
     MAX_TRANSPORT_Q_DOT,
     POSITION_DEADBAND,
     POSITION_SOFT_ZONE,
+    PLACE_TRANSIT_HEIGHT,
     REFERENCE_PREVIEW_GAIN,
     RELEASE_HOLD_FRAMES,
     ROTATION_DEADBAND,
@@ -51,11 +55,13 @@ from src.task.pbvs_mpc_phases import (
     handle_release_phase,
 )
 from src.task.pbvs_mpc_runtime import (
+    JointVelocitySmoother,
     clip_gripper_ctrl,
     draw_runtime_overlay,
     get_gripper_ctrl_for_phase,
     project_image_point_to_world_plane,
     set_gripper_ctrl,
+    solve_cartesian_transport_qdot,
     update_target_pose_for_step,
 )
 from src.task.pbvs_mpc_setup import build_runtime
@@ -64,6 +70,7 @@ from src.perception.pose_estimator import draw_apriltags
 from src.sim.rendering import MujocoRenderer
 from src.utils.transforms import (
     build_desired_tag_camera_transform_from_grasp,
+    invert_transform,
     make_transform,
 )
 
@@ -91,6 +98,7 @@ def main():
     lost_tag_count = runtime["lost_tag_count"]
     attached_target_offset_world = runtime["attached_target_offset_world"]
     attached_target_quat = runtime["attached_target_quat"]
+    attached_target_pose_site = runtime["attached_target_pose_site"]
     locked_approach_camera_rotation_world = runtime["locked_approach_camera_rotation_world"]
     last_e_p_cam = runtime["last_e_p_cam"]
     last_e_r_cam = runtime["last_e_r_cam"]
@@ -105,6 +113,23 @@ def main():
     place_site_target_world = runtime["place_site_target_world"]
     t_grasp_camera = runtime["t_grasp_camera"]
     global_renderer = runtime["global_renderer"]
+    joint_velocity_smoother = JointVelocitySmoother(
+        max_acceleration=JOINT_ACCELERATION_LIMIT,
+    )
+    target_collision_disabled = False
+    floor_geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+    base_body_id = env.get_body_id("base")
+    robot_body_ids = set()
+    for body_id in range(model.nbody):
+        ancestor_id = body_id
+        while ancestor_id > 0:
+            if ancestor_id == base_body_id:
+                robot_body_ids.add(body_id)
+                break
+            ancestor_id = int(model.body_parentid[ancestor_id])
+    last_phase = None
+    floor_contact_warned = False
+    frame_count = 0
     prev_global_plane_point = None
 
     try:
@@ -139,6 +164,7 @@ def main():
                     target_motion,
                     attached_target_offset_world,
                     attached_target_quat,
+                    attached_target_pose_site,
                 )
 
                 measured_target_pos = current_target_pos.copy()
@@ -322,6 +348,7 @@ def main():
                         ARM_DOF_COUNT,
                         HEIGHT,
                         MAX_TRANSPORT_Q_DOT,
+                        site_name=SITE_NAME,
                     )
                     control_applied = True
 
@@ -338,10 +365,13 @@ def main():
                         ARM_DOF_COUNT,
                         HEIGHT,
                         MAX_PLACE_Q_DOT,
+                        site_name=SITE_NAME,
+                        transit_height=PLACE_TRANSIT_HEIGHT,
                     )
                     control_applied = True
 
                     if place_done:
+                        grasp_state_machine.start_release()
                         release_frames_remaining = RELEASE_HOLD_FRAMES
 
                 if grasp_state_machine.phase == "home":
@@ -407,6 +437,7 @@ def main():
                         actuator_names=ACTUATOR_NAMES,
                         arm_dof_count=ARM_DOF_COUNT,
                         target_is_mocap=target_is_mocap,
+                        site_name=SITE_NAME,
                     )
 
                     if servo_result["success"]:
@@ -426,6 +457,10 @@ def main():
                                 attached_target_offset_world = servo_result["attached_target_offset_world"]
                             if servo_result["attached_target_quat"] is not None:
                                 attached_target_quat = servo_result["attached_target_quat"]
+                            if servo_result["attached_target_pose_site"] is not None:
+                                attached_target_pose_site = servo_result["attached_target_pose_site"]
+                            env.set_body_collision_enabled(TARGET_BODY_NAME, False)
+                            target_collision_disabled = True
 
                 if not control_applied:
                     lost_tag_count += 1
@@ -433,6 +468,16 @@ def main():
                     if grasp_state_machine.phase == "approach" and lost_tag_count >= BLIND_ATTACH_FRAMES:
                         grasp_state_machine.force_attach()
                         locked_approach_camera_rotation_world = None
+                        current_site_pos, current_site_rotation = env.get_site_pose(SITE_NAME)
+                        target_rotation_world = target_motion.quaternion_to_rotation_matrix(
+                            current_target_quat
+                        )
+                        attached_target_pose_site = (
+                            invert_transform(
+                                make_transform(current_site_rotation, current_site_pos)
+                            )
+                            @ make_transform(target_rotation_world, current_target_pos)
+                        )
                         if target_is_mocap:
                             target_motion.auto_mode = False
                             target_motion.manual_pos = current_target_pos.copy()
@@ -441,7 +486,9 @@ def main():
                             )
                             attached_target_offset_world = current_target_pos - current_site_pos
                             attached_target_quat = current_target_quat.copy()
-                        grasp_state_machine.start_lift(current_site_pos)
+                        grasp_state_machine.start_lift(current_site_pos, current_site_rotation)
+                        env.set_body_collision_enabled(TARGET_BODY_NAME, False)
+                        target_collision_disabled = True
 
                     if lost_tag_count <= LOST_TAG_HOLD_FRAMES:
                         q_dot_hold = np.clip(
@@ -461,11 +508,100 @@ def main():
                             2,
                         )
                     else:
-                        env.zero_joint_velocity(ACTUATOR_NAMES)
-                        last_q_dot = np.zeros(ARM_DOF_COUNT, dtype=np.float64)
+                        if not grasp_state_machine.attached:
+                            target_rotation_world = target_motion.quaternion_to_rotation_matrix(
+                                current_target_quat
+                            )
+                            current_site_pos, current_site_rotation = env.get_site_pose(SITE_NAME)
+                            camera_rotation_world = data.cam_xmat[camera_id].reshape(3, 3)
+                            site_camera_rotation = current_site_rotation.T @ camera_rotation_world
+                            desired_site_rotation = (
+                                target_rotation_world @ site_camera_rotation.T
+                            )
+                            desired_site_pos = (
+                                current_target_pos
+                                + target_rotation_world @ np.array(
+                                    [0.0, 0.0, DESIRED_STANDOFF],
+                                    dtype=np.float64,
+                                )
+                            )
+                            recovery_position_error = desired_site_pos - current_site_pos
+                            recovery_rotation_error = cv2.Rodrigues(
+                                desired_site_rotation @ current_site_rotation.T
+                            )[0].ravel()
+                            last_q_dot = solve_cartesian_transport_qdot(
+                                env,
+                                robot_kin,
+                                mpc_controller,
+                                recovery_position_error,
+                                last_q_dot,
+                                MAX_Q_DOT,
+                                ARM_DOF_COUNT,
+                                orientation_error_world=recovery_rotation_error,
+                                site_name=SITE_NAME,
+                            )
+                            env.apply_joint_velocity(ACTUATOR_NAMES, last_q_dot)
+                        else:
+                            env.zero_joint_velocity(ACTUATOR_NAMES)
+                            last_q_dot = np.zeros(ARM_DOF_COUNT, dtype=np.float64)
                         last_e_p_cam[:] = 0.0
                         last_e_r_cam[:] = 0.0
                         grasp_state_machine.settled_count = 0
+
+                desired_q_dot = np.array(
+                    [
+                        data.actuator(name).ctrl
+                        for name in ACTUATOR_NAMES
+                    ],
+                    dtype=np.float64,
+                )
+                last_q_dot = joint_velocity_smoother.update(
+                    desired_q_dot,
+                    controller_dt,
+                )
+                env.apply_joint_velocity(ACTUATOR_NAMES, last_q_dot)
+
+                if target_collision_disabled and not grasp_state_machine.attached:
+                    env.set_body_collision_enabled(TARGET_BODY_NAME, True)
+                    target_collision_disabled = False
+
+                if grasp_state_machine.phase != last_phase:
+                    current_site_pos, _ = env.get_site_pose(SITE_NAME)
+                    print(
+                        f"[PHASE] {grasp_state_machine.phase} "
+                        f"site_z={current_site_pos[2]:.3f} "
+                        f"attached={grasp_state_machine.attached}"
+                    )
+                    last_phase = grasp_state_machine.phase
+                if os.environ.get("UR5_DEBUG") == "1" and frame_count % 20 == 0:
+                    current_site_pos, current_site_rotation = env.get_site_pose(SITE_NAME)
+                    transport_rotation_error = 0.0
+                    if grasp_state_machine.transport_rotation_world is not None:
+                        transport_rotation_error = np.linalg.norm(
+                            cv2.Rodrigues(
+                                grasp_state_machine.transport_rotation_world
+                                @ current_site_rotation.T
+                            )[0]
+                        )
+                    place_position_error = 0.0
+                    if grasp_state_machine.place_target_pos_world is not None:
+                        place_position_error = np.linalg.norm(
+                            grasp_state_machine.place_target_pos_world - current_site_pos
+                        )
+                    print(
+                        "[DEBUG] "
+                        f"phase={grasp_state_machine.phase} "
+                        f"site={np.round(current_site_pos, 3)} "
+                        f"target={np.round(current_target_pos, 3)} "
+                        f"e_p={np.linalg.norm(last_e_p_cam):.4f} "
+                        f"e_r={np.linalg.norm(last_e_r_cam):.4f} "
+                        f"tags={len(tags)} global={len(global_tags)} "
+                        f"lost={lost_tag_count} "
+                        f"transport_r={transport_rotation_error:.4f} "
+                        f"place_p={place_position_error:.4f} "
+                        f"stage={grasp_state_machine.place_stage} "
+                        f"q_dot={np.round(last_q_dot, 3)}"
+                    )
 
                 renderer.show_camera_image(vis)
 
@@ -482,6 +618,16 @@ def main():
                     break
 
                 env.step(SIM_STEPS_PER_CONTROL)
+                frame_count += 1
+                if floor_geom_id >= 0 and not floor_contact_warned:
+                    for contact in data.contact[:data.ncon]:
+                        if floor_geom_id not in (contact.geom1, contact.geom2):
+                            continue
+                        other_geom = contact.geom2 if contact.geom1 == floor_geom_id else contact.geom1
+                        if model.geom_bodyid[other_geom] in robot_body_ids:
+                            print("[COLLISION] robot contacted the floor")
+                            floor_contact_warned = True
+                            break
                 viewer.sync()
                 time.sleep(GUI_SLEEP)
     finally:

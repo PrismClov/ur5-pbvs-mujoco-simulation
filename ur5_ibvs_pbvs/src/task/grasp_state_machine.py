@@ -68,8 +68,10 @@ class GraspStateMachine:
         self.attached = False
         self.lift_start_pos_world = None
         self.lift_target_pos_world = None
+        self.transport_rotation_world = None
         self.place_start_pos_world = None
         self.place_target_pos_world = None
+        self.place_stage = 0
 
     def reset(self):
         self.phase = "track"
@@ -77,8 +79,10 @@ class GraspStateMachine:
         self.attached = False
         self.lift_start_pos_world = None
         self.lift_target_pos_world = None
+        self.transport_rotation_world = None
         self.place_start_pos_world = None
         self.place_target_pos_world = None
+        self.place_stage = 0
 
     def get_desired_standoff(self):
         if self.phase == "track":
@@ -179,10 +183,15 @@ class GraspStateMachine:
         self.attached = True
         self.settled_count = 0
 
-    def start_lift(self, current_pos_world):
+    def start_lift(self, current_pos_world, current_rotation_world=None):
         current_pos_world = np.asarray(current_pos_world, dtype=np.float64)
         self.lift_start_pos_world = current_pos_world.copy()
         self.lift_target_pos_world = current_pos_world + self.lift_offset_world
+        if current_rotation_world is not None:
+            self.transport_rotation_world = np.asarray(
+                current_rotation_world,
+                dtype=np.float64,
+            ).copy()
 
     def get_lift_error_world(self, current_pos_world):
         """
@@ -200,6 +209,7 @@ class GraspStateMachine:
     def start_place(self, current_pos_world, place_target_pos_world=None):
         current_pos_world = np.asarray(current_pos_world, dtype=np.float64)
         self.phase = "place"
+        self.place_stage = 0
         self.place_start_pos_world = current_pos_world.copy()
         if place_target_pos_world is None:
             self.place_target_pos_world = current_pos_world + self.place_offset_world
@@ -219,6 +229,10 @@ class GraspStateMachine:
     def start_home(self):
         self.phase = "home"
         self.attached = False
+        self.settled_count = 0
+
+    def start_release(self):
+        self.phase = "release"
         self.settled_count = 0
 
     def mark_done(self):

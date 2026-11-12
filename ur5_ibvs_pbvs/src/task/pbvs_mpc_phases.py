@@ -4,6 +4,12 @@ import numpy as np
 from src.task.pbvs_mpc_runtime import solve_cartesian_transport_qdot
 
 
+def _rotation_error_world(target_rotation, current_rotation):
+    rotation_error = np.asarray(target_rotation) @ np.asarray(current_rotation).T
+    rotation_vector, _ = cv2.Rodrigues(rotation_error)
+    return rotation_vector.ravel()
+
+
 def handle_release_phase(
     env,
     actuator_names,
@@ -43,8 +49,18 @@ def handle_lift_phase(
     arm_dof_count,
     height,
     max_transport_q_dot,
+    site_name="attachment_site",
+    rotation_tolerance=0.08,
 ):
     lift_position_error_world, lift_done = grasp_state_machine.get_lift_error_world(current_site_pos)
+    _, current_site_rotation = env.get_site_pose(site_name)
+    if grasp_state_machine.transport_rotation_world is None:
+        grasp_state_machine.transport_rotation_world = current_site_rotation.copy()
+    rotation_error_world = _rotation_error_world(
+        grasp_state_machine.transport_rotation_world,
+        current_site_rotation,
+    )
+    lift_done = lift_done and np.linalg.norm(rotation_error_world) < rotation_tolerance
     q_dot_lift = solve_cartesian_transport_qdot(
         env,
         robot_kin,
@@ -53,6 +69,8 @@ def handle_lift_phase(
         last_q_dot,
         max_transport_q_dot,
         arm_dof_count,
+        orientation_error_world=rotation_error_world,
+        site_name=site_name,
     )
 
     if lift_done:
@@ -90,8 +108,44 @@ def handle_place_phase(
     arm_dof_count,
     height,
     max_place_q_dot,
+    site_name="attachment_site",
+    transit_height=0.46,
+    transit_tolerance=0.015,
+    rotation_tolerance=0.08,
 ):
-    place_position_error_world, place_done = grasp_state_machine.get_place_error_world(current_site_pos)
+    final_place_target = np.asarray(
+        grasp_state_machine.place_target_pos_world,
+        dtype=np.float64,
+    )
+    if grasp_state_machine.place_stage == 0:
+        place_waypoint = final_place_target.copy()
+        place_waypoint[2] = max(transit_height, final_place_target[2])
+        place_position_error_world = place_waypoint - np.asarray(current_site_pos, dtype=np.float64)
+        if np.linalg.norm(place_position_error_world) < transit_tolerance:
+            grasp_state_machine.place_stage = 1
+            place_position_error_world = final_place_target - np.asarray(
+                current_site_pos,
+                dtype=np.float64,
+            )
+            place_done = np.linalg.norm(place_position_error_world) < grasp_state_machine.place_position_tol
+        else:
+            place_done = False
+    else:
+        place_position_error_world = final_place_target - np.asarray(
+            current_site_pos,
+            dtype=np.float64,
+        )
+        place_done = np.linalg.norm(place_position_error_world) < grasp_state_machine.place_position_tol
+
+    _, current_site_rotation = env.get_site_pose(site_name)
+    if grasp_state_machine.transport_rotation_world is None:
+        grasp_state_machine.transport_rotation_world = current_site_rotation.copy()
+    rotation_error_world = _rotation_error_world(
+        grasp_state_machine.transport_rotation_world,
+        current_site_rotation,
+    )
+    place_done = place_done and np.linalg.norm(rotation_error_world) < rotation_tolerance
+
     q_dot_place = solve_cartesian_transport_qdot(
         env,
         robot_kin,
@@ -100,6 +154,8 @@ def handle_place_phase(
         last_q_dot,
         max_place_q_dot,
         arm_dof_count,
+        orientation_error_world=rotation_error_world,
+        site_name=site_name,
     )
 
     if place_done:
@@ -108,7 +164,7 @@ def handle_place_phase(
     env.apply_joint_velocity(actuator_names, q_dot_place)
     cv2.putText(
         vis,
-        "PLACING ATTACHED TARGET",
+        f"PLACING ATTACHED TARGET  STAGE {grasp_state_machine.place_stage + 1}/2",
         (10, height - 20),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,

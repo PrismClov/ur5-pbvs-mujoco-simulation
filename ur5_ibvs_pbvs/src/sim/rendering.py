@@ -83,7 +83,10 @@ class MujocoRenderer:
 
     def close(self):
         if self.show_window:
-            cv2.destroyWindow(self.window_name)
+            try:
+                cv2.destroyWindow(self.window_name)
+            except cv2.error:
+                pass
         if self.offscreen_window is not None:
             glfw.destroy_window(self.offscreen_window)
         glfw.terminate()

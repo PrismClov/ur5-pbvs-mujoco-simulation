@@ -2,7 +2,38 @@ import cv2
 import numpy as np
 
 from src.perception.target_motion import TargetMotionController
-from src.utils.transforms import make_transform, rotation_matrix_to_quaternion
+from src.utils.transforms import invert_transform, make_transform, rotation_matrix_to_quaternion
+
+
+class JointVelocitySmoother:
+    """Rate-limit joint acceleration so phase changes do not create a jerk."""
+
+    def __init__(self, max_acceleration=18.0, deadband=0.005):
+        self.max_acceleration = float(max_acceleration)
+        self.deadband = float(deadband)
+        self.previous = None
+
+    def reset(self, q_dot=None):
+        self.previous = (
+            None
+            if q_dot is None
+            else np.asarray(q_dot, dtype=np.float64).copy()
+        )
+
+    def update(self, desired_q_dot, dt):
+        desired_q_dot = np.asarray(desired_q_dot, dtype=np.float64)
+        if self.previous is None:
+            self.previous = np.zeros_like(desired_q_dot)
+
+        max_delta = self.max_acceleration * max(float(dt), 1e-6)
+        applied_q_dot = self.previous + np.clip(
+            desired_q_dot - self.previous,
+            -max_delta,
+            max_delta,
+        )
+        applied_q_dot[np.abs(applied_q_dot) < self.deadband] = 0.0
+        self.previous = applied_q_dot.copy()
+        return applied_q_dot
 
 
 def build_error_state_world(e_p_cam, e_r_cam, camera_rotation_world, r_mj_camera_from_cv_camera):
@@ -24,9 +55,14 @@ def compute_orientation_lock_error_in_camera_frame(
     return e_r_cam.ravel()
 
 
-def build_lift_error_state_world(lift_position_error_world):
+def build_lift_error_state_world(lift_position_error_world, orientation_error_world=None):
+    if orientation_error_world is None:
+        orientation_error_world = np.zeros(3, dtype=np.float64)
     return np.concatenate(
-        [np.asarray(lift_position_error_world, dtype=np.float64), np.zeros(3, dtype=np.float64)],
+        [
+            np.asarray(lift_position_error_world, dtype=np.float64),
+            np.asarray(orientation_error_world, dtype=np.float64),
+        ],
         axis=0,
     )
 
@@ -133,8 +169,26 @@ def update_target_pose_for_step(
     target_motion,
     attached_target_offset_world,
     attached_target_quat,
+    attached_target_pose_site=None,
 ):
-    if target_is_mocap:
+    if grasp_state_machine.attached and attached_target_pose_site is not None:
+        site_pos, site_rotation = env.get_site_pose(site_name)
+        attached_pose_site = np.asarray(attached_target_pose_site, dtype=np.float64)
+        target_pos = site_pos + site_rotation @ attached_pose_site[:3, 3]
+        target_rotation = site_rotation @ attached_pose_site[:3, :3]
+        target_quat = rotation_matrix_to_quaternion(target_rotation)
+
+        env.set_target_pose(target_body_name, target_pos, target_quat)
+        env.forward()
+        current_site_pos, _ = env.get_site_pose(site_name)
+
+        if target_is_mocap:
+            current_target_pos = data.mocap_pos[target_mocap_id].copy()
+            current_target_quat = data.mocap_quat[target_mocap_id].copy()
+        else:
+            current_target_pos = data.xpos[target_body_id].copy()
+            current_target_quat = data.xquat[target_body_id].copy()
+    elif target_is_mocap:
         target_pos, target_quat = target_motion.get_target_pose(data.time)
 
         if grasp_state_machine.attached:
@@ -197,9 +251,15 @@ def solve_cartesian_transport_qdot(
     last_q_dot,
     max_q_dot,
     arm_dof_count,
+    orientation_error_world=None,
+    site_name="attachment_site",
 ):
-    error_state_world = build_lift_error_state_world(error_world)
-    jacobian = robot_kin.compute_frame_jacobian(env.get_joint_positions(arm_dof_count))
+    error_state_world = build_lift_error_state_world(
+        error_world,
+        orientation_error_world=orientation_error_world,
+    )
+    # Use the real grasp site for both the error and Jacobian.
+    jacobian = env.compute_site_jacobian(site_name, arm_dof_count)
     q_dot = mpc_controller.solve(
         error_state_world,
         jacobian,

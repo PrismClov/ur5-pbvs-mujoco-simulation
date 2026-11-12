@@ -8,6 +8,7 @@ class MujocoEnv:
         self.scene_xml = scene_xml
         self.model = mujoco.MjModel.from_xml_path(scene_xml)
         self.data = mujoco.MjData(self.model)
+        self._body_collision_defaults = {}
 
     def reset_to_home(self):
         if self.model.nkey > 0:
@@ -51,6 +52,14 @@ class MujocoEnv:
         mat = self.data.site_xmat[site_id].reshape(3, 3).copy()
         return pos, mat
 
+    def compute_site_jacobian(self, site_name, arm_dof_count=6):
+        """Return the world-frame 6xN Jacobian for a MuJoCo site."""
+        site_id = self.get_site_id(site_name)
+        jacp = np.zeros((3, self.model.nv), dtype=np.float64)
+        jacr = np.zeros((3, self.model.nv), dtype=np.float64)
+        mujoco.mj_jacSite(self.model, self.data, jacp, jacr, site_id)
+        return np.vstack([jacp, jacr])[:, :arm_dof_count].copy()
+
     def get_joint_positions(self, n=6):
         return self.data.qpos[:n].copy()
 
@@ -76,11 +85,42 @@ class MujocoEnv:
     def set_target_pose(self, target_body_name, pos, quat):
         body_id = self.get_body_id(target_body_name)
         mocap_id = self.model.body_mocapid[body_id]
-        if mocap_id < 0:
-            raise ValueError(f"body is not mocap-enabled: {target_body_name}")
-
         quat = np.asarray(quat, dtype=np.float64)
         quat = quat / max(np.linalg.norm(quat), 1e-12)
 
-        self.data.mocap_pos[mocap_id] = pos
-        self.data.mocap_quat[mocap_id] = quat
+        if mocap_id >= 0:
+            self.data.mocap_pos[mocap_id] = pos
+            self.data.mocap_quat[mocap_id] = quat
+            return
+
+        joint_id = int(self.model.body_jntadr[body_id])
+        if joint_id < 0 or self.model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE:
+            raise ValueError(f"body is neither mocap-controlled nor free-jointed: {target_body_name}")
+
+        qpos_adr = int(self.model.jnt_qposadr[joint_id])
+        qvel_adr = int(self.model.jnt_dofadr[joint_id])
+        self.data.qpos[qpos_adr:qpos_adr + 3] = np.asarray(pos, dtype=np.float64)
+        self.data.qpos[qpos_adr + 3:qpos_adr + 7] = quat
+        self.data.qvel[qvel_adr:qvel_adr + 6] = 0.0
+
+    def set_body_collision_enabled(self, body_name, enabled):
+        """Temporarily disable free-body contacts while it is kinematically attached."""
+        body_id = self.get_body_id(body_name)
+        if body_id not in self._body_collision_defaults:
+            geom_ids = np.flatnonzero(self.model.geom_bodyid == body_id)
+            self._body_collision_defaults[body_id] = [
+                (
+                    int(geom_id),
+                    int(self.model.geom_contype[geom_id]),
+                    int(self.model.geom_conaffinity[geom_id]),
+                )
+                for geom_id in geom_ids
+            ]
+
+        for geom_id, contype, conaffinity in self._body_collision_defaults[body_id]:
+            if enabled:
+                self.model.geom_contype[geom_id] = contype
+                self.model.geom_conaffinity[geom_id] = conaffinity
+            else:
+                self.model.geom_contype[geom_id] = 0
+                self.model.geom_conaffinity[geom_id] = 0

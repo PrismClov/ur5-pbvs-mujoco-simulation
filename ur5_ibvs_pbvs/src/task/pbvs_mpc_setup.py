@@ -116,6 +116,7 @@ def build_runtime(scene_xml):
     lost_tag_count = 0
     attached_target_offset_world = np.zeros(3, dtype=np.float64)
     attached_target_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    attached_target_pose_site = None
     locked_approach_camera_rotation_world = None
     last_e_p_cam = np.zeros(3, dtype=np.float64)
     last_e_r_cam = np.zeros(3, dtype=np.float64)
@@ -160,9 +161,9 @@ def build_runtime(scene_xml):
         dynamic_attach_position_tol=0.022,
         dynamic_attach_rotation_tol_rad=np.deg2rad(12.0),
         dynamic_attach_settle_frames_required=1,
-        lift_offset_world=[0.0, 0.0, 0.08],
+        lift_offset_world=[0.0, 0.0, 0.14],
         place_offset_world=[0.0, 0.0, 0.0],
-        place_position_tol=0.01,
+        place_position_tol=0.015,
     )
     home_qpos = env.get_joint_positions(ARM_DOF_COUNT)
     place_site_target_world = PLACE_BOX_CENTER_WORLD + np.array(
@@ -207,6 +208,7 @@ def build_runtime(scene_xml):
         "lost_tag_count": lost_tag_count,
         "attached_target_offset_world": attached_target_offset_world,
         "attached_target_quat": attached_target_quat,
+        "attached_target_pose_site": attached_target_pose_site,
         "locked_approach_camera_rotation_world": locked_approach_camera_rotation_world,
         "last_e_p_cam": last_e_p_cam,
         "last_e_r_cam": last_e_r_cam,
