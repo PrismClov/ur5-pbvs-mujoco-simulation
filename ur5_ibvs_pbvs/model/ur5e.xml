@@ -71,7 +71,6 @@
     <material
       name="apriltag_mat"
       texture="apriltag_tex"
-      texuniform="true"
     />
   </asset>
 

@@ -1,1 +1,8 @@
-
+casadi==3.8.2
+glfw==2.11.0
+mujoco==3.17.0
+numpy==2.2.6
+opencv-python==5.0.0.93
+pin==4.1.0
+pupil-apriltags==1.0.4.post11
+scipy==1.15.3

@@ -1,8 +1,9 @@
 import mujoco
 import numpy as np
+from pathlib import Path
 
 
-SCENE_XML = "/home/adrian/ur5_ibvs_pbvs/model/scene.xml"
+SCENE_XML = str(Path(__file__).resolve().parent / "model" / "scene.xml")
 
 
 def main():

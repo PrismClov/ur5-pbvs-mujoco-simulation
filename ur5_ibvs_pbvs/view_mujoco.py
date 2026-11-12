@@ -1,5 +1,6 @@
 import math
 import time
+from pathlib import Path
 
 import cv2
 import glfw
@@ -9,8 +10,8 @@ import numpy as np
 from pupil_apriltags import Detector
 
 
-# 你的 MuJoCo 场景文件
-SCENE_XML = "/home/adrian/ur5-pbvs-mujoco-simulation/ur5_ibvs_pbvs/model/scene_with_gripper.xml"
+# 该入口使用 mocap 目标场景；带夹爪的传送带场景由 main_pbvs_mpc.py 使用。
+SCENE_XML = str(Path(__file__).resolve().parent / "model" / "scene.xml")
 
 # 末端相机名称
 CAMERA_NAME = "end_effector_camera"
