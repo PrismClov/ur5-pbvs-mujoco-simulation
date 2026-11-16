@@ -197,3 +197,13 @@ track -> approach -> attach -> lift -> place -> release -> home -> done
 - pupil-apriltags
 - Pinocchio
 - MuJoCo Menagerie 的 UR5e 模型资源
+
+
+## Nova5 + D435i 预测前馈视觉伺服（2026-11-17）
+
+新增独立的 [Nova5 ROS2 工程](nova5_visual_servo/README.md)，包含 PBVS、12 维 ESKF、预测和速度前馈。原 UR5 MuJoCo 仿真保持不变。
+
+- [对话归档](docs/session_2026-11-17/conversation.txt)
+- [项目状态与待办](docs/session_2026-11-17/项目状态.txt)
+
+传送带无编码器；混合 IBVS/PBVS 与自动调参尚未实现，当前代码未实机验收。

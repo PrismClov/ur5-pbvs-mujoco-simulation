@@ -1,0 +1,9 @@
+repositories:
+  DOBOT_6Axis_ROS2_V4:
+    type: git
+    url: https://github.com/Dobot-Arm/DOBOT_6Axis_ROS2_V4.git
+    version: 7807ef8fb31e8f86a76cd474a4a9cddffef6eca9
+  realsense-ros:
+    type: git
+    url: https://github.com/realsenseai/realsense-ros.git
+    version: 960306819f45006ca3f903aa046bed32c509679a

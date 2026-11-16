@@ -1,0 +1,119 @@
+Nova5 预测 + 前馈 PBVS 控制核心
+================================
+
+一、交付范围
+根据《Nova5_Fast_PBVS_V1_重构思路》扩展动态目标跟踪。
+本文档中“V1 不加入预测/前馈”是原方案范围；本次按你的要求加入。
+提供 Python + NumPy 离线算法核心及回归测试，无网络连接、使能或运动入口。
+没有读取原 PBVS 源码，因此本实现是新的参考核心，不能称为原算法等价重构。
+未提供或验证 Nova5 DH/URDF、SDK、反馈协议、手眼标定和设备边界。
+
+二、坐标与时间
+T_AB 表示把 B 坐标变换到 A；B=基座，E=末端，C=相机，Q=二维码。
+采用眼在手上：T_BQ(t_img)=FK(q_visual) T_EC T_CQ。
+q_visual 必须由反馈历史插值到曝光时刻，不能拿处理完成时的当前关节值代替。
+PnP 返回 T_CQ；T_EC 来自手眼标定，若现有标定给出反方向需先求逆。
+角度为 rad，长度为 m，时间为 s；SDK 若采用度，仅在驱动边界转换。
+所有时间须映射到同一单调时钟。反馈参数是采样时刻，不是随手填接收时刻。
+没有反馈源时间戳及可靠时钟映射时，不能声称实现了严格同步预测。
+
+三、估计与预测（已升级 ESKF）
+TargetTracker 现位于 target_pose_ekf.py。新帧在曝光时刻转换到基座系后，
+用 12 维左乘误差状态 ESKF 联合估计位置、速度、旋转、base 系角速度。
+传播名义恒速状态和协方差，以位置及 Log(R_meas R_pred^T) 创新更新；
+Joseph 形式更新协方差，注入后重置姿态误差协方差。
+均值仍是 p+v*h 与 Exp(omega*h)R，不含加速度状态。
+控制周期的 predict 为无副作用预测；协方差过大、未热身、连续拒绝或时域超限不可用。
+主要噪声参数、拒绝与重初始化策略详见 README 的 ESKF 更新说明。
+机器人侧仍为 q+qd*h；不能把文档 255 ms 直接当作纯延迟补偿。
+
+四、期望位姿、控制律与前馈
+T_QC_des 为经过确认的“目标系中的期望相机位姿”。
+也可以由现有期望 PnP 位姿计算：T_QC_des = inverse(T_CQ_des)。
+例如 T_CQ_des 的平移为 [0,0,0.5] m，而旋转必须沿用实际二维码坐标约定。
+不能直接把 T_QC_des 平移写成 [0,0,0.5]，也不能臆定正对二维码的旋转为单位阵。
+
+T_QE_des = T_QC_des inverse(T_EC)
+T_BE_des = T_BQ_pred T_QE_des
+e_p = p_E_des - p_E_pred
+e_R = Log(R_E_des R_E_pred^T)
+xi_P = response_scale * diag(kp) * [e_p; e_R]
+
+r = R_BQ_pred p_QE_des
+v_E_ff = v_Q + omega_Q × r
+omega_E_ff = omega_Q
+xi_req = xi_P + ff_gain * [v_E_ff; omega_E_ff]
+
+叉乘项包含目标到期望末端的完整偏置，也包含相机与末端的安装偏置。
+预测改变误差的评估时刻；前馈在误差接近零时仍提供跟踪速度，二者职责不同。
+response_scale 仅缩放 P 通道，不能顺带把前馈一起放大。
+
+使用基座系几何雅可比 J(q_pred)：上三行为末端原点线速度，下三行为角速度。
+不是未转换的 body Jacobian，也不是平移部分具有其他定义的空间 twist Jacobian。
+W=diag(task_scale)，A=WJ：
+qdot_req = A^T (A A^T + damping^2 I)^(-1) W xi_req
+task_scale 用于米和弧度的任务单位平衡，不自动保证“图像中心优先”。
+当前是六维加权 PBVS，不是严格像素任务优先级控制器。
+
+五、参考生成
+v_goal = clip(qdot_req, -v_max, v_max)
+v_next = v_prev + clip(v_goal-v_prev, -a_max*dt, a_max*dt)
+q_plan_next = q_plan_prev + 0.5*(v_prev+v_next)*dt
+
+持续积分 q_plan，不每周期用滞后的 q_actual 重置积分基点。
+速度与加速度限制仅约束参考；没有 jerk 约束、制动距离保证或闭环稳定性证明。
+靠近限位不能依赖最后一个周期的越界检查制动，实机监督需预留已验证的制动裕量。
+workspace_ok 必须实现真实工作空间/碰撞约束，本测试中的恒 True 只用于合成模型。
+
+六、如何接到已有 Nova5 工程
+1. 反馈线程：单 socket 单读取者，按真实协议做持续缓冲、半包/多包解析。
+   缓存时间戳和关节历史，控制侧取最新完整反馈，视觉侧做曝光时刻插值。
+   本交付没有真实协议，因此不编造二进制帧布局或提供假称可用的解析器。
+2. 视觉线程：现有 PnP 质量检查、重投影误差、深度/二维码 ID 检查通过后，
+   将新帧与配对 FK 送入有界邮箱。不要与 tick 并发修改 tracker。
+3. 控制线程独占 tracker 和 controller；先消费按时序有效的视觉观测，再运行 tick。
+   建议沿用文档约 30 Hz 视觉、20 ms 控制周期，以实测 dt 为准，不做 Python 硬实时承诺。
+4. 初始化 Config 所有必填参数；接入 FK、几何雅可比、workspace_ok，确认初始机器人静止、
+   无残留队列，并从可信实际状态初始化 q_plan 与 v。设备边界不采用测试文件数值。
+5. 调用 tick 得到 q_plan；经已有驱动发一个绝对关节 ServoJ 目标。
+   ServoJ 函数签名、角度单位、队列语义和 SDK 平滑以实际版本为准。
+6. 发送链需有界、只保留最新未发送命令，不能无界排队补发。
+   tick 已推进内部状态；任何发送失败/超期或 SDK 输出异常都必须终止本轮运行，
+   不得简单重试下一 tick。外层停止后才允许重新同步并创建控制器。
+7. tracker.update 或 tick 发生异常、反馈断连、急停、SDK 故障时，外层调用已验证
+   的硬件暂停/停止流程。Fault 本身不会停止机器人，零速度也不等于硬件安全停止。
+
+驱动主循环结构（示意，不是能直接运行的 Nova5 SDK 代码）：
+  try:
+      取出有效新视觉帧；tracker.update(seq, t_img, FK(q_visual), T_EC, T_CQ)
+      result = controller.tick(now, q_actual, qd_actual, feedback_sample_time)
+      final_target = 已有SDK发送函数(result['q_plan'])
+      检查调用结果、耗时及最终发送目标；非阻塞写日志
+  except Exception:
+      调用已经验证的停止接口；退出控制循环并锁存故障
+
+七、配置与日志
+日常仅调 response_scale。kp、DLS、速度估计时间常数、ff_gain、预测时域及设备边界
+在分阶段验收后冻结，不把它们都当提速旋钮。
+prediction=False / feedforward=False 是消融实验开关。
+prediction=False 为无外推诊断基线，不代表严格曝光时刻原 PBVS 等价。
+日志包含 tick 返回的 P/FF/error/request/limits/q_plan/ages，以及 q_sent_final、
+QTarget/QDTarget/QActual/QDActual、曝光/采样/收包/解析/发送时刻与丢日志计数。
+日志用有界非阻塞队列，SDK 后平滑需另行检查最终目标差分。
+
+八、运行与验证
+依赖：Python 3 + NumPy。无 SciPy 依赖。
+在这两个 .py 文件所在目录运行：
+  python -m unittest -v test_predictive_pbvs.py
+测试涵盖旋转映射、相机自运动消除、重复帧、预测/前馈、旋转偏置、
+参考积分、限速限加速度、反馈过期锁存、异常观测、关节边界及合成平移跟踪。
+合成测试使用理想笛卡尔模型，不是 Nova5 动力学仿真，不证明实机 300 ms 回正。
+
+现场验收顺序：固定目标纯 P → 移动目标加 FF → 单独开启预测 → 停止/换向/丢帧。
+固定目标分别统计 30/50/100 px 初偏差；5 px 连续保持 0.2 s；报告重复实验分布。
+移动目标增加匀速、加速、反向、突然停止，记录像素误差、距离、姿态与参考-实际漂移。
+严格图像中心优先若是硬要求，需要在已有 PBVS 上进一步设计像素任务权重/优先级并验收。
+
+参考：用户提供的重构文档，以及 PBVS 基础综述（本实现的预测/前馈是工程扩展）：
+Chaumette & Hutchinson, Visual Servo Control, Part I: Basic Approaches.
+https://faculty.cc.gatech.edu/~seth/ResPages/pdfs/ChaHut06.pdf

@@ -1,0 +1,149 @@
+{
+  "site_verified": false,
+  "feedback_sample_time_verified": false,
+  "optical_frame": "camera_color_optical_frame",
+  "feedback_max_gap": 0.05,
+  "T_EC": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "T_QC_des": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      -0.5
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "workspace_min": [
+    -1,
+    -1,
+    -1
+  ],
+  "workspace_max": [
+    1,
+    1,
+    1
+  ],
+  "servoj_parameters": [
+    "t=0.03"
+  ],
+  "tracker": {
+    "max_gap": 0.15,
+    "max_speed": 1.0,
+    "max_omega": 2.0,
+    "position_std_m": 0.002,
+    "orientation_std_rad": 0.00872664626,
+    "linear_accel_psd_m2_s3": 0.02,
+    "angular_accel_psd_rad2_s3": 0.2
+  },
+  "control": {
+    "v_max": [
+      0.2,
+      0.2,
+      0.2,
+      0.2,
+      0.2,
+      0.2
+    ],
+    "a_max": [
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5,
+      0.5
+    ],
+    "q_min": [
+      -3,
+      -3,
+      -3,
+      -3,
+      -3,
+      -3
+    ],
+    "q_max": [
+      3,
+      3,
+      3,
+      3,
+      3,
+      3
+    ],
+    "follow_max": [
+      0.15,
+      0.15,
+      0.15,
+      0.15,
+      0.15,
+      0.15
+    ],
+    "kp": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "task_scale": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "damping": 0.03,
+    "max_visual_age": 0.12,
+    "max_feedback_age": 0.05,
+    "max_prediction": 0.15,
+    "dt_min": 0.005,
+    "dt_max": 0.04,
+    "response_scale": 1.0,
+    "ff_gain": 1.0,
+    "execution_lead": 0.0,
+    "prediction": true,
+    "feedforward": true
+  }
+}
