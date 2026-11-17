@@ -186,6 +186,64 @@ P=2.0 只经过小偏差探针验证，未提升为生产默认值。不同幅�
 python3 nova5_tongji/scripts/analyze_pixel_probe.py /absolute/path/to/experiment
 ```
 
+### 参数梯次扫描
+
+`run_gradient_sweep.py` 面向当前已验证的 V4L2/TCP ArUco 执行链，自动逐组
+覆盖 `gain`、`angular_gain` 和 `speed_factor`。它要求 Dobot 驱动、D435i 相机和
+单标记 tracker 已运行，并会在每轮自行启动、arm/start、采样和停止执行器。
+
+默认只打印组合；显式加 `--execute` 才会运动：
+
+```bash
+python3 nova5_tongji/scripts/run_gradient_sweep.py \
+  --gains 1:4:1 --angular-gains 0.5:1:0.5 --speed-factors 30 \
+  --duration 8 --execute
+```
+
+`1:4:1` 表示包含端点地生成 `1, 2, 3, 4`，多个点也可写成 `1,2,4`。脚本默认每轮
+暂停，要求把标记放回相同初始偏移并确认工作空间；非交互运行可加
+`--no-prompt-between-runs`。结果目录包含：
+
+- `summary.csv` / `summary.json`：各组合的命令数、误差均值/P95、最终误差、
+  ServoJ 往返、发送周期、最大关节速度和累计位移
+- `trial_NNN/tracking.jsonl`：执行器原始日志
+- `trial_NNN/command.json`：本轮完整命令和参数
+
+每轮默认限制线性速度 5 cm/s、累计平移 50 mm、累计旋转 5°；脚本不会自动提高这些边界。
+
+当前 ArUco 执行器支持误差—速度自适应增益：默认误差从 12 px 到 30 px 时逐步提高，
+目标图像速度从 60 px/s 降到 20 px/s 时也会逐步提高相同权重。大误差且慢目标时，
+增益从基础值升至 `large-error-gain`，线性速度上限从基础值升至
+`large-error-max-linear-speed`；快速目标仍坚持基础增益。
+
+```bash
+python3 nova5_tongji/scripts/run_gradient_sweep.py \
+  --adaptive-gain --gains 2.4 --large-error-gains 4:8:2 \
+  --angular-gains 1 --speed-factors 30 --execute
+```
+
+也可在直接启动执行器时使用 `--adaptive-gain`，并通过
+`--large-error-start-px`、`--large-error-full-px`、
+`--slow-target-full-px-s`、`--slow-target-zero-px-s` 调整过渡区。
+
+现场移动目标优先使用
+`/home/clover/ur_ws/ibvs_rm65/config/nova5_fast_tracking.yaml`。该配置开启目标图像
+速度前馈，平移基础限速为 10 cm/s，大误差上限为 16 cm/s，ServoJ 时间片为 20 ms；
+单标记旋转只使用 0.5 增益和 0.15° 单步上限，避免角度噪声耗尽运动预算。
+
+同一配置还提供静态回中冲刺：目标图像速度低于 8 px/s 且误差达到 4 px 时，将
+`ServoP` 单步时间片临时提高到 100 ms，并使用最高 15 cm/s、单步不超过 20 mm 的
+平滑笛卡尔修正。它用于一次消掉大部分静态居中误差，而不是反复执行 20 ms 小步。
+
+```bash
+ros2 run ibvs_ur5 nova5_low_speed_executor.py \
+  --config /home/clover/ur_ws/ibvs_rm65/config/nova5_fast_tracking.yaml \
+  --execute --output-log /tmp/nova5-fast-tracking.jsonl
+```
+
+启动后仍需显式调用 `/nova5_ibvs/arm_execution` 和
+`/nova5_ibvs/start_execution`。前馈只补偿观测到的目标速度，不等于替代位置闭环。
+
 ## 机械臂执行入口
 
 ```bash

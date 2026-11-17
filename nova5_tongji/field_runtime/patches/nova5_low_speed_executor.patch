@@ -1,0 +1,609 @@
+--- a/src/ibvs_ur5/mujoco/pbvs/nova5_low_speed_executor.py
++++ b/src/ibvs_ur5/mujoco/pbvs/nova5_low_speed_executor.py
+@@ -175,6 +175,83 @@
+     return max(response_time, send_time + duration + settle_margin)
+ 
+ 
++def adaptive_gain_parameters(
++    *,
++    enabled: bool,
++    feature_rms_px: float,
++    target_speed_px_s: float,
++    target_speed_available: bool,
++    base_gain: float,
++    boosted_gain: float,
++    base_max_linear_speed: float,
++    boosted_max_linear_speed: float,
++    large_error_start_px: float,
++    large_error_full_px: float,
++    slow_target_full_px_s: float,
++    slow_target_zero_px_s: float,
++) -> dict[str, float | bool]:
++    """Blend a faster recentering response for slow targets and large error."""
++    if not enabled or not target_speed_available:
++        return {
++            'active': False,
++            'blend': 0.0,
++            'gain': float(base_gain),
++            'max_linear_speed': float(base_max_linear_speed),
++            'error_weight': 0.0,
++            'slow_target_weight': 0.0,
++        }
++    error_span = large_error_full_px - large_error_start_px
++    speed_span = slow_target_zero_px_s - slow_target_full_px_s
++    error_weight = float(np.clip(
++        (feature_rms_px - large_error_start_px) / error_span, 0.0, 1.0))
++    if target_speed_px_s <= slow_target_full_px_s:
++        slow_weight = 1.0
++    elif target_speed_px_s >= slow_target_zero_px_s:
++        slow_weight = 0.0
++    else:
++        slow_weight = (
++            slow_target_zero_px_s - target_speed_px_s) / speed_span
++    error_weight = error_weight * error_weight * (3.0 - 2.0 * error_weight)
++    slow_weight = slow_weight * slow_weight * (3.0 - 2.0 * slow_weight)
++    blend = error_weight * slow_weight
++    return {
++        'active': blend > 0.0,
++        'blend': float(blend),
++        'gain': float(base_gain + (boosted_gain - base_gain) * blend),
++        'max_linear_speed': float(
++            base_max_linear_speed +
++            (boosted_max_linear_speed - base_max_linear_speed) * blend),
++        'error_weight': float(error_weight),
++        'slow_target_weight': float(slow_weight),
++    }
++
++
++def limit_planned_joint_step(
++    current_joints_deg,
++    target_joints_deg,
++    duration_s: float,
++    max_speed_deg_s: float,
++) -> tuple[list[float], float, bool]:
++    """Scale a joint-space target so its planned speed stays below the limit."""
++    current = np.asarray(
++        current_joints_deg, dtype=np.float64).reshape(-1)
++    target = np.asarray(
++        target_joints_deg, dtype=np.float64).reshape(-1)
++    if (
++        current.shape != (6,) or target.shape != (6,) or
++        not np.all(np.isfinite(current)) or
++        not np.all(np.isfinite(target)) or
++        duration_s <= 0.0 or max_speed_deg_s <= 0.0
++    ):
++        raise ValueError('invalid planned joint step')
++    delta_deg = target - current
++    requested = float(np.max(np.abs(delta_deg)) / duration_s)
++    if requested <= max_speed_deg_s:
++        return target.tolist(), requested, False
++    scale = max_speed_deg_s / requested
++    return (current + delta_deg * scale).tolist(), requested, True
++
++
+ def acquire_instance_lock(path: Path):
+     """Acquire a non-blocking process-wide executor lock."""
+     path = Path(path).expanduser()
+@@ -207,6 +284,7 @@
+     def __init__(self, args: argparse.Namespace):
+         super().__init__('nova5_low_speed_executor')
+         self.args = args
++        self.active_command_duration = args.command_duration
+         self.instance_lock_handle = acquire_instance_lock(
+             args.instance_lock_file)
+         self.hand_eye_calibration = load_calibration(args.calibration)
+@@ -256,6 +334,8 @@
+         self.pending: PendingCall | None = None
+         self.last_detection_stamp = None
+         self.last_pose_query_stamp = None
++        self.last_tool_pose_used_wall: float | None = None
++        self.consecutive_pose_parse_failures = 0
+         self.last_servo_completion_wall: float | None = None
+         self.last_commanded_target: np.ndarray | None = None
+         self.last_command_summary: dict = {}
+@@ -396,12 +476,20 @@
+             if source_stamp is None or
+             self.previous_image_source_stamp is None
+             else source_stamp - self.previous_image_source_stamp)
++        board_type = detection.get('board_type')
++        feature_count = len(detection.get('feature_ids') or [])
++        if board_type == 'marker':
++            board_valid = feature_count >= self.args.min_features
++        elif board_type == 'charuco':
++            board_valid = (
++                int(detection.get('marker_count') or 0) >=
++                self.args.min_markers and
++                int(detection.get('charuco_corner_count') or 0) >=
++                self.args.min_charuco_corners)
++        else:
++            board_valid = False
+         fully_valid = (
+-            bool(detection.get('valid')) and
+-            int(detection.get('marker_count') or 0) >=
+-            self.args.min_markers and
+-            int(detection.get('charuco_corner_count') or 0) >=
+-            self.args.min_charuco_corners and
++            bool(detection.get('valid')) and board_valid and
+             float(detection.get('reprojection_rms_px') or np.inf) <=
+             self.args.max_reprojection_rms_px
+         )
+@@ -428,7 +516,7 @@
+         ):
+             ready_time = (
+                 event['send_time'] +
+-                self.args.command_duration +
++                self.active_command_duration +
+                 self.args.command_settle_margin)
+             image_wait = max(0.0, now - ready_time)
+             self.image_wait_intervals.append(image_wait)
+@@ -625,7 +713,7 @@
+                 now - self.robot_mode_wall > self.args.max_robot_mode_age
+             ):
+                 return 'robot_mode_stale'
+-            allowed_modes = (5, 7, 8) if running else (5,)
++            allowed_modes = (4, 5, 7, 8) if running else (5,)
+             if self.robot_mode not in allowed_modes:
+                 return f'robot_mode_not_ready:{self.robot_mode}'
+         if self.latest_tool_wall is None:
+@@ -658,15 +746,20 @@
+             return 'image_too_old'
+         if not detection.get('valid'):
+             return 'tracker_invalid'
+-        if detection.get('board_type') != 'charuco':
+-            return 'charuco_mode_required'
+-        if int(detection.get('marker_count') or 0) < self.args.min_markers:
+-            return 'too_few_markers'
+-        if (
+-            int(detection.get('charuco_corner_count') or 0) <
+-            self.args.min_charuco_corners
+-        ):
+-            return 'too_few_charuco_corners'
++        board_type = detection.get('board_type')
++        if board_type == 'marker':
++            if len(detection.get('feature_ids') or []) < self.args.min_features:
++                return 'too_few_marker_corners'
++        elif board_type == 'charuco':
++            if int(detection.get('marker_count') or 0) < self.args.min_markers:
++                return 'too_few_markers'
++            if (
++                int(detection.get('charuco_corner_count') or 0) <
++                self.args.min_charuco_corners
++            ):
++                return 'too_few_charuco_corners'
++        else:
++            return 'unsupported_board_type'
+         try:
+             rms = float(detection.get('reprojection_rms_px'))
+         except (TypeError, ValueError):
+@@ -1038,6 +1131,7 @@
+         self.reason = 'setting_speed_factor'
+         self.last_detection_stamp = None
+         self.last_pose_query_stamp = None
++        self.last_tool_pose_used_wall = None
+         self.last_servo_completion_wall = None
+         self.last_commanded_target = None
+         self.commands_sent = 0
+@@ -1246,19 +1340,34 @@
+         ready_time = command_ready_time(
+             send_time,
+             response_time,
+-            self.args.command_duration,
++            self.active_command_duration,
+             self.args.command_settle_margin,
+         )
+         if now < ready_time:
+             return
+         stamp = float(self.latest_detection.get('stamp_sec', 0.0))
+-        if stamp == self.last_pose_query_stamp:
++        fast_direct_pose = bool(
++            self.args.command_mode == 'servo_p' and
++            self.args.use_tool_pose_directly)
++        if (
++            stamp == self.last_pose_query_stamp and
++            self.args.command_mode != 'servo_p_stream' and
++            not (
++                fast_direct_pose and
++                self.latest_tool_wall is not None and
++                (
++                    self.last_tool_pose_used_wall is None or
++                    self.latest_tool_wall > self.last_tool_pose_used_wall
++                )
++            )
++        ):
+             return
+         self.last_pose_query_stamp = stamp
+-        if self.args.command_mode == 'servo_p_stream':
++        if self.args.command_mode == 'servo_p_stream' or fast_direct_pose:
+             if self.latest_tool_pose is None or self.latest_tool_wall is None:
+                 self.transition_fault('tool_pose_unavailable')
+                 return
++            self.last_tool_pose_used_wall = self.latest_tool_wall
+             self.process_control_pose(self.latest_tool_pose.copy())
+             return
+         event = self.current_servop_timing
+@@ -1289,8 +1398,16 @@
+             current_pose = parse_dobot_pose_response(
+                 response.robot_return)
+         except ValueError as exc:
++            self.consecutive_pose_parse_failures += 1
++            if self.consecutive_pose_parse_failures < 3:
++                self.reason = (
++                    'retrying_invalid_get_pose:'
++                    f'{self.consecutive_pose_parse_failures}')
++                self.publish_status(force=True)
++                return
+             self.transition_fault(f'invalid_get_pose:{exc}')
+             return
++        self.consecutive_pose_parse_failures = 0
+         self.process_control_pose(current_pose)
+ 
+     def process_control_pose(self, current_pose: np.ndarray) -> None:
+@@ -1341,8 +1458,16 @@
+                 tracking[:3, :3])
+             tracking_rotation = float(np.linalg.norm(
+                 tracking_rotation.reshape(3)))
++            tracking_limit_m = self.args.max_tracking_error_m
+             if (
+-                tracking_position > self.args.max_tracking_error_m or
++                self.last_command_summary.get('static_recenter_active')
++            ):
++                tracking_limit_m = max(
++                    tracking_limit_m,
++                    self.args.static_recenter_tracking_error_m,
++                )
++            if (
++                tracking_position > tracking_limit_m or
+                 tracking_rotation >
+                 math.radians(self.args.max_tracking_error_deg)
+             ):
+@@ -1443,14 +1568,22 @@
+         feedforward_reason = 'disabled'
+         feedforward_matched = 0
+         target_velocity_speed = 0.0
++        target_speed_available = False
++        estimate = self.latest_velocity_estimate
++        detection_stamp = float(detection.get('stamp_sec', 0.0))
++        estimate_matches_frame = bool(
++            estimate is not None and estimate.valid and
++            abs(estimate.timestamp - detection_stamp) <= 1e-6)
++        if estimate_matches_frame:
++            target_velocity_speed = float(np.linalg.norm(
++                estimate.filtered_center_velocity_px_s))
++            target_speed_available = True
+         if self.args.enable_target_feedforward:
+-            estimate = self.latest_velocity_estimate
+-            detection_stamp = float(detection.get('stamp_sec', 0.0))
+             if estimate is None or not estimate.valid:
+                 feedforward_reason = (
+                     'unavailable' if estimate is None
+                     else estimate.reason)
+-            elif abs(estimate.timestamp - detection_stamp) > 1e-6:
++            elif not estimate_matches_frame:
+                 feedforward_reason = 'timestamp_mismatch'
+             else:
+                 (
+@@ -1466,17 +1599,50 @@
+                     feedforward_reason = 'too_few_velocity_features'
+                 else:
+                     feedforward_reason = 'applied'
+-                    target_velocity_speed = float(np.linalg.norm(
+-                        estimate.filtered_center_velocity_px_s))
++        feature_rms_px = float(np.sqrt(np.mean(
++            (current - desired).reshape(-1) ** 2)))
++        adaptive = adaptive_gain_parameters(
++            enabled=self.args.adaptive_gain,
++            feature_rms_px=feature_rms_px,
++            target_speed_px_s=target_velocity_speed,
++            target_speed_available=target_speed_available,
++            base_gain=self.args.gain,
++            boosted_gain=self.args.large_error_gain,
++            base_max_linear_speed=self.args.max_linear_speed,
++            boosted_max_linear_speed=(
++                self.args.large_error_max_linear_speed),
++            large_error_start_px=self.args.large_error_start_px,
++            large_error_full_px=self.args.large_error_full_px,
++            slow_target_full_px_s=self.args.slow_target_full_px_s,
++            slow_target_zero_px_s=self.args.slow_target_zero_px_s,
++        )
++        static_recenter = bool(
++            self.args.static_recenter_sprint and
++            target_speed_available and
++            target_velocity_speed <= self.args.static_target_speed_px_s and
++            feature_rms_px >= self.args.static_recenter_error_px
++        )
++        control_gain = float(adaptive['gain'])
++        control_max_linear_speed = float(adaptive['max_linear_speed'])
++        control_duration = self.args.command_duration
++        if static_recenter:
++            control_gain = max(
++                control_gain, self.args.static_recenter_gain)
++            control_max_linear_speed = max(
++                control_max_linear_speed,
++                self.args.static_recenter_max_linear_speed,
++            )
++            control_duration = self.args.static_recenter_duration
++        self.active_command_duration = control_duration
+         try:
+             result = dynamic_damped_image_control(
+                 current,
+                 desired,
+                 depths,
+                 calibration,
+-                gain=self.args.gain,
++                gain=control_gain,
+                 damping=self.args.damping,
+-                max_linear_speed=self.args.max_linear_speed,
++                max_linear_speed=control_max_linear_speed,
+                 max_angular_speed=self.args.max_angular_speed,
+                 angular_gain=self.args.angular_gain,
+                 min_features=self.args.min_features,
+@@ -1505,6 +1671,14 @@
+                 result.singular_values.tolist()),
+             'control_valid': result.valid,
+             'control_reason': result.reason,
++            'adaptive_gain_active': adaptive['active'],
++            'adaptive_gain_blend': adaptive['blend'],
++            'effective_gain': control_gain,
++            'effective_max_linear_speed': control_max_linear_speed,
++            'target_center_velocity_px_s': target_velocity_speed,
++            'target_speed_available': target_speed_available,
++            'static_recenter_active': static_recenter,
++            'active_command_duration_sec': control_duration,
+         }
+         if not result.valid:
+             self.transition_fault(result.reason)
+@@ -1523,7 +1697,7 @@
+                 current_pose,
+                 self.tool_to_camera,
+                 result.velocity,
+-                self.args.command_duration,
++                control_duration,
+                 self.args.max_step_translation_m,
+                 self.args.max_step_rotation_rad,
+             )
+@@ -1556,7 +1730,7 @@
+                 target_values)
+             if command_key == 'servo_p':
+                 request.param_value = [
+-                    f't={self.args.command_duration:.4f}',
++                    f't={control_duration:.4f}',
+                     f'aheadtime={self.args.servo_aheadtime:.1f}',
+                     f'gain={self.args.servo_gain:.1f}',
+                 ]
+@@ -1570,7 +1744,7 @@
+             depths,
+             calibration,
+             result.velocity,
+-            self.args.command_duration,
++            control_duration,
+         )
+         self.last_detection_stamp = float(
+             detection.get('stamp_sec', 0.0))
+@@ -1585,6 +1759,15 @@
+             'target_feedforward_reason': feedforward_reason,
+             'target_feedforward_matched_features': feedforward_matched,
+             'target_center_velocity_px_s': target_velocity_speed,
++            'target_speed_available': target_speed_available,
++            'adaptive_gain_active': adaptive['active'],
++            'adaptive_gain_blend': adaptive['blend'],
++            'adaptive_error_weight': adaptive['error_weight'],
++            'adaptive_slow_target_weight': adaptive['slow_target_weight'],
++            'effective_gain': control_gain,
++            'effective_max_linear_speed': control_max_linear_speed,
++            'static_recenter_active': static_recenter,
++            'active_command_duration_sec': control_duration,
+             'image_similarity': image_similarity_metrics(
+                 current, desired),
+             'camera_velocity_limited_mps_radps': (
+@@ -1620,7 +1803,7 @@
+             stream_message = Float64MultiArray()
+             stream_message.data = [
+                 *target_values,
+-                float(self.args.command_duration),
++                float(control_duration),
+             ]
+             self.stream_pub.publish(stream_message)
+             self.on_servo_complete(type('Response', (), {'res': 0})())
+@@ -1675,16 +1858,36 @@
+         if len(joints) != 6 or not np.all(np.isfinite(joints)):
+             self.transition_fault('invalid_inverse_kin_joint_count')
+             return
++        planned_joint_speed_limited = False
++        requested_joint_speed_deg_s = None
++        if self.previous_joint_position is not None:
++            current_joints_deg = np.rad2deg(
++                self.previous_joint_position[:6])
++            (
++                joints,
++                requested_joint_speed_deg_s,
++                planned_joint_speed_limited,
++            ) = limit_planned_joint_step(
++                current_joints_deg,
++                joints,
++                self.active_command_duration,
++                self.args.max_planned_joint_speed_deg_s,
++            )
+         from dobot_msgs_v4.srv import ServoJ
+         request = ServoJ.Request()
+         request.a, request.b, request.c, request.d, request.e, request.f = joints
+         request.param_value = [
+-            f't={self.args.command_duration:.4f}',
++            f't={self.active_command_duration:.4f}',
+             f'aheadtime={self.args.servo_aheadtime:.1f}',
+             f'gain={self.args.servo_gain:.1f}',
+         ]
+         if self.last_command_summary is not None:
+             self.last_command_summary['inverse_kin_joint_deg'] = joints
++            self.last_command_summary[
++                'requested_joint_speed_deg_s'] = requested_joint_speed_deg_s
++            self.last_command_summary[
++                'planned_joint_speed_limited'] = (
++                    planned_joint_speed_limited)
+         self.call_service(
+             'servo_j', 'servo_j', request, self.on_servo_complete)
+ 
+@@ -1740,7 +1943,7 @@
+         ):
+             self.command_budget_stop_deadline = (
+                 self.last_servo_completion_wall +
+-                self.args.command_duration +
++                self.active_command_duration +
+                 self.args.command_settle_margin)
+             self.reason = 'waiting_for_command_budget_completion'
+             return
+@@ -1908,6 +2111,15 @@
+         help='Cartesian command used by the executor.',
+     )
+     parser.add_argument(
++        '--use-tool-pose-directly',
++        action=argparse.BooleanOptionalAction,
++        default=False,
++        help=(
++            'Use the fresh ToolVectorActual topic instead of a GetPose '
++            'service round-trip for each ServoP command.'
++        ),
++    )
++    parser.add_argument(
+         '--speed-factor-service',
+         dest='speed_factor_service',
+         default='/dobot_bringup_ros2/srv/SpeedFactor')
+@@ -1920,6 +2132,54 @@
+     parser.add_argument('--damping', type=float, default=0.2)
+     parser.add_argument('--angular-gain', type=float, default=1.0)
+     parser.add_argument(
++        '--adaptive-gain',
++        action=argparse.BooleanOptionalAction,
++        default=False,
++        help=(
++            'Increase gain and linear-speed cap for large image error when '
++            'the target image velocity is low.'
++        ),
++    )
++    parser.add_argument('--large-error-gain', type=float, default=6.0)
++    parser.add_argument(
++        '--large-error-max-linear-speed', type=float, default=0.08)
++    parser.add_argument(
++        '--large-error-start-px', type=float, default=12.0)
++    parser.add_argument(
++        '--large-error-full-px', type=float, default=30.0)
++    parser.add_argument(
++        '--slow-target-full-px-s', type=float, default=20.0)
++    parser.add_argument(
++        '--slow-target-zero-px-s', type=float, default=60.0)
++    parser.add_argument(
++        '--static-recenter-sprint',
++        action=argparse.BooleanOptionalAction,
++        default=False,
++        help=(
++            'Use a longer smooth Cartesian step for a stationary target '
++            'when recentering error is large.'
++        ),
++    )
++    parser.add_argument(
++        '--static-recenter-error-px', type=float, default=4.0)
++    parser.add_argument(
++        '--static-target-speed-px-s', type=float, default=10.0)
++    parser.add_argument(
++        '--static-recenter-gain', type=float, default=12.0)
++    parser.add_argument(
++        '--static-recenter-max-linear-speed', type=float, default=0.15)
++    parser.add_argument(
++        '--static-recenter-duration', type=float, default=0.10)
++    parser.add_argument(
++        '--static-recenter-tracking-error-mm',
++        type=float,
++        default=24.0,
++        help=(
++            'Tracking tolerance while a static recenter sprint target is '
++            'in flight.'
++        ),
++    )
++    parser.add_argument(
+         '--enable-target-feedforward',
+         action=argparse.BooleanOptionalAction,
+         default=False,
+@@ -2020,6 +2280,15 @@
+         help='Maximum joint speed in rad/s; 0 disables the check.',
+     )
+     parser.add_argument(
++        '--max-planned-joint-speed-deg-s',
++        type=float,
++        default=120.0,
++        help=(
++            'Scale an inverse-kinematics target before ServoJ when its '
++            'planned joint speed exceeds this value.'
++        ),
++    )
++    parser.add_argument(
+         '--joint-speed-filter-alpha', type=float, default=0.3)
+     parser.add_argument('--max-status-age', type=float, default=0.5)
+     parser.add_argument('--max-robot-mode-age', type=float, default=1.5)
+@@ -2080,6 +2349,39 @@
+         parser.error(f'desired feature file does not exist: {args.desired_file}')
+     if args.gain <= 0.0 or args.damping < 0.0 or args.angular_gain <= 0.0:
+         parser.error('gain/angular-gain must be positive and damping >= 0')
++    if args.large_error_gain < args.gain:
++        parser.error('large-error gain must be at least the base gain')
++    if args.large_error_max_linear_speed < args.max_linear_speed:
++        parser.error(
++            'large-error linear-speed cap must be at least the base cap')
++    if not (
++        0.0 <= args.large_error_start_px <
++        args.large_error_full_px
++    ):
++        parser.error(
++            'large-error thresholds must satisfy 0 <= start < full')
++    if not (
++        0.0 <= args.slow_target_full_px_s <
++        args.slow_target_zero_px_s
++    ):
++        parser.error(
++            'slow-target thresholds must satisfy 0 <= full < zero')
++    if args.static_recenter_gain < args.gain:
++        parser.error(
++            'static-recenter gain must be at least the base gain')
++    if args.static_recenter_max_linear_speed < args.max_linear_speed:
++        parser.error(
++            'static-recenter speed cap must be at least the base cap')
++    if args.static_recenter_error_px <= 0.0:
++        parser.error('static-recenter error threshold must be positive')
++    if args.static_target_speed_px_s < 0.0:
++        parser.error('static-target speed threshold must not be negative')
++    if not 0.02 <= args.static_recenter_duration <= 0.2:
++        parser.error(
++            'static-recenter duration must be within [0.02, 0.2] s')
++    if args.static_recenter_tracking_error_mm <= 0.0:
++        parser.error(
++            'static-recenter tracking tolerance must be positive')
+     if args.feedforward_gain < 0.0:
+         parser.error('feedforward gain must not be negative')
+     if not 0.0 < args.velocity_smoothing_alpha <= 1.0:
+@@ -2131,8 +2433,8 @@
+         parser.error('maximum rotation step must be positive')
+     if not math.isfinite(args.min_tool_z_mm):
+         parser.error('minimum tool Z must be finite')
+-    if args.min_features < 6:
+-        parser.error('at least six features are required')
++    if args.min_features < 4:
++        parser.error('at least four image features are required')
+     if not 0.0 < args.min_feature_fraction <= 1.0:
+         parser.error('minimum feature fraction must be in (0, 1]')
+     if args.min_feature_rms_px < 0.0:
+@@ -2153,6 +2455,8 @@
+         parser.error(
+             'maximum joint speed must be non-negative; '
+             '0 disables the check')
++    if args.max_planned_joint_speed_deg_s <= 0.0:
++        parser.error('maximum planned joint speed must be positive')
+     if not 0.0 < args.joint_speed_filter_alpha <= 1.0:
+         parser.error('joint speed filter alpha must be in (0, 1]')
+     if args.max_robot_mode_age <= 0.0:
+@@ -2174,6 +2478,8 @@
+         args.max_pose_disagreement_mm * 0.001)
+     args.max_tracking_error_m = (
+         args.max_tracking_error_mm * 0.001)
++    args.static_recenter_tracking_error_m = (
++        args.static_recenter_tracking_error_mm * 0.001)
+     args.max_cumulative_translation_m = (
+         args.max_cumulative_translation_mm * 0.001)
+     args.max_cumulative_rotation_rad = np.deg2rad(

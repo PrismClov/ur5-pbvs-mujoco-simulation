@@ -1,0 +1,25 @@
+{
+  "date": "2026-11-17",
+  "method": "15-second live ROS subscription measurement plus active ServoP command timestamps from nova5_tracking_manual_qr.jsonl",
+  "feedback_and_vision": {
+    "joint_states_hz": 50.0166,
+    "tool_vector_actual_hz": 50.0168,
+    "camera_image_hz": 29.9793,
+    "detection_callback_hz": 30.1481,
+    "executor_status_hz": 16.8190
+  },
+  "active_servop": {
+    "unique_commands": 539,
+    "active_interval_seconds": 22.0827,
+    "frequency_hz": 24.2724,
+    "period_p50_ms": 33.3579,
+    "period_p95_ms": 66.7164,
+    "service_latency_p95_ms": 27.9599,
+    "service_latency_max_ms": 32.7735
+  },
+  "limitations": [
+    "The final 15-second timing window had no valid marker because it left the camera view.",
+    "ServoP frequency is reported only from the preceding active tracking segment.",
+    "The 200 ms static recenter target was not achieved and is not claimed."
+  ]
+}

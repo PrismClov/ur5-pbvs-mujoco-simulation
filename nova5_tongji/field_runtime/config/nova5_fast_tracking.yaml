@@ -1,0 +1,60 @@
+# Faster moving-target profile for the verified Nova5 + ArUco stack.
+# Translation feedforward handles QR motion; rotation stays lightly weighted
+# because a single planar marker has noisy roll/pitch/yaw decomposition.
+
+calibration: /home/clover/ur_ws/src/ibvs_ur5/config/nova5_d435_hand_eye_robust.yaml
+desired-file: /home/clover/ur_ws/ibvs_rm65/runtime/nova5_aruco_center_040m.json
+camera-info-topic: /camera/custom/color/camera_info
+command-mode: servo_p
+use-tool-pose-directly: true
+continuous-tracking: true
+auto-resume-after-hold: true
+min-markers: 0
+min-charuco-corners: 0
+min-features: 4
+min-feature-fraction: 1.0
+
+gain: 4.0
+large-error-gain: 9.0
+adaptive-gain: true
+large-error-start-px: 8.0
+large-error-full-px: 24.0
+slow-target-full-px-s: 30.0
+slow-target-zero-px-s: 120.0
+damping: 0.4
+angular-gain: 0.5
+static-recenter-sprint: true
+static-recenter-error-px: 4.0
+static-target-speed-px-s: 8.0
+static-recenter-gain: 12.0
+static-recenter-max-linear-speed: 0.12
+static-recenter-duration: 0.10
+static-recenter-tracking-error-mm: 24.0
+
+enable-target-feedforward: true
+feedforward-gain: 0.8
+velocity-smoothing-alpha: 0.45
+velocity-max-dt: 0.12
+min-velocity-features: 4
+max-target-speed-px-s: 800.0
+target-velocity-jump-px-s: 1200.0
+
+max-linear-speed: 0.10
+large-error-max-linear-speed: 0.16
+max-angular-speed-deg: 5.0
+max-step-rotation-deg: 0.15
+max-step-translation-mm: 12.0
+command-duration: 0.02
+command-settle-margin: 0.0
+servo-aheadtime: 35.0
+servo-gain: 650.0
+speed-factor: 70
+
+max-runtime-sec: 300.0
+max-commands: 0
+max-cumulative-translation-mm: 2000.0
+max-cumulative-rotation-deg: 30.0
+max-joint-speed-rad-s: 0.80
+max-planned-joint-speed-deg-s: 100.0
+max-tracking-error-mm: 12.0
+status-hz: 20.0

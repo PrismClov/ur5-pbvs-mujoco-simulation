@@ -1,0 +1,62 @@
+{
+  "source": "runtime marker-centered frontoparallel target at 0.40 m",
+  "target_camera_to_board_center_m": [
+    0.0,
+    0.0,
+    0.4
+  ],
+  "distance_definition": "camera_optical_origin_to_marker_center",
+  "board_rotation_quaternion_xyzw": [
+    0.0,
+    0.0,
+    0.0,
+    1.0
+  ],
+  "image_resolution_px": [
+    424,
+    240
+  ],
+  "principal_point_px": [
+    208.03802490234375,
+    121.84537506103516
+  ],
+  "board_type": "marker",
+  "tag_id": 0,
+  "tag_size_m": 0.1,
+  "marker_length_m": 0.1,
+  "features": {
+    "0": [
+      169.86956405639648,
+      83.73815155029297
+    ],
+    "1": [
+      246.20648574829102,
+      83.73815155029297
+    ],
+    "2": [
+      246.20648574829102,
+      159.95259857177734
+    ],
+    "3": [
+      169.86956405639648,
+      159.95259857177734
+    ]
+  },
+  "camera_matrix": [
+    [
+      305.3476867675781,
+      0.0,
+      208.03802490234375
+    ],
+    [
+      0.0,
+      304.8577880859375,
+      121.84537506103516
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ]
+}

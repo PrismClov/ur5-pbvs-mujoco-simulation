@@ -1,0 +1,11 @@
+--- a/src/ibvs_ur5/mujoco/pbvs/detector_utils.py
++++ b/src/ibvs_ur5/mujoco/pbvs/detector_utils.py
+@@ -16,7 +16,7 @@
+     parameters.adaptiveThreshWinSizeMax = 31
+     parameters.adaptiveThreshWinSizeStep = 2
+     parameters.minMarkerPerimeterRate = 0.01
+-    parameters.maxMarkerPerimeterRate = 0.5
++    parameters.maxMarkerPerimeterRate = 0.9
+     parameters.polygonalApproxAccuracyRate = 0.05
+     parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+     return cv2.aruco.ArucoDetector(dictionary, parameters)

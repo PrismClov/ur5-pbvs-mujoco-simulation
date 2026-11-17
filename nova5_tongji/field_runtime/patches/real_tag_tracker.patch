@@ -1,0 +1,14 @@
+--- a/src/ibvs_ur5/mujoco/pbvs/real_tag_tracker.py
++++ b/src/ibvs_ur5/mujoco/pbvs/real_tag_tracker.py
+@@ -575,7 +575,10 @@
+             pnp_depths = point_depths(
+                 pose, self.args.tag_size, mode='pnp_corner')
+             timing['pnp_done_timestamp'] = time.time()
+-            feature_ids = np.full(4, self.args.tag_id, dtype=np.int32)
++            # Each marker corner is a distinct image feature. Reusing the tag
++            # id for all four corners collapses them into one feature id and
++            # makes the image-based controller reject the observation.
++            feature_ids = np.arange(4, dtype=np.int32)
+             sample_corners = inset_corners(
+                 corners, self.args.depth_inset_px)
+         else:
