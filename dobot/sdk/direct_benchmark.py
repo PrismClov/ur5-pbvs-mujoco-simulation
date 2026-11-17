@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import threading
 import time
 
@@ -62,6 +63,7 @@ def main() -> int:
         feedback_start = robot.feedback_count
         feedback_time_start = robot.feedback_last_monotonic
         send_durations = []
+        acknowledgements = []
 
         def hold_current_joints() -> None:
             current = robot.get_joint_position()
@@ -70,6 +72,7 @@ def main() -> int:
             robot.set_joints(current)
             if robot.servo_send_last_duration_s is not None:
                 send_durations.append(robot.servo_send_last_duration_s)
+            acknowledgements.append(str(robot.servo_send_last_result or ""))
 
         timer = threading.Timer(args.duration, stop_event.set)
         timer.start()
@@ -86,6 +89,17 @@ def main() -> int:
             if feedback_time_start is not None and feedback_time_end is not None
             else 0.0
         )
+        ack_ids = []
+        ack_errors = []
+        ack_order_violations = 0
+        for acknowledgement in acknowledgements:
+            numbers = [int(value) for value in re.findall(r"-?\d+", acknowledgement)]
+            if len(numbers) >= 2:
+                ack_errors.append(numbers[0])
+                ack_ids.append(numbers[1])
+        for previous, current in zip(ack_ids, ack_ids[1:]):
+            if current <= previous:
+                ack_order_violations += 1
         result = {
             "control": stats.__dict__,
             "servo_send_count": robot.servo_send_count,
@@ -94,6 +108,13 @@ def main() -> int:
                 if send_durations else None),
             "servo_send_duration_max_s": (
                 max(send_durations) if send_durations else None),
+            "servo_acknowledgements": sum(bool(x) for x in acknowledgements),
+            "servo_empty_acknowledgements": sum(
+                not bool(x) for x in acknowledgements),
+            "servo_ack_errors": sorted(set(ack_errors)),
+            "servo_ack_command_ids_min": min(ack_ids) if ack_ids else None,
+            "servo_ack_command_ids_max": max(ack_ids) if ack_ids else None,
+            "servo_ack_order_violations": ack_order_violations,
             "feedback_packets": feedback_end - feedback_start,
             "feedback_duration_s": feedback_duration,
             "feedback_hz": (

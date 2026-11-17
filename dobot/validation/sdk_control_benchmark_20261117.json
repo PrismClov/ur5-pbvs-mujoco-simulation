@@ -1,0 +1,26 @@
+{
+  "control": {
+    "requested_hz": 50.0,
+    "ticks": 250,
+    "duration_s": 5.000169783999809,
+    "actual_hz": 49.99830221765317,
+    "deadlines_missed": 0,
+    "max_lateness_s": 0.0,
+    "step_duration_p50_s": 0.0002853269998013275,
+    "step_duration_p95_s": 0.0005200332498134228
+  },
+  "servo_send_count": 250,
+  "servo_send_duration_p50_s": 0.0001140609992944519,
+  "servo_send_duration_max_s": 0.0014746219994776766,
+  "servo_acknowledgements": 249,
+  "servo_empty_acknowledgements": 1,
+  "servo_ack_errors": [
+    0
+  ],
+  "servo_ack_command_ids_min": 2,
+  "servo_ack_command_ids_max": 250,
+  "servo_ack_order_violations": 0,
+  "feedback_packets": 300,
+  "feedback_duration_s": 5.00039258400011,
+  "feedback_hz": 59.99528936186291
+}
