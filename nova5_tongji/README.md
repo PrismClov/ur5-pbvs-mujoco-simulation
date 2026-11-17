@@ -120,8 +120,35 @@ bash nova5_tongji/scripts/run_preview.sh --ros-args \
 - 关节 `/joint_states_robot`
 - 标记观测 `/visual_servo/target`
 
-可通过 ROS `-r 原话题:=现场话题` 重映射。旧项目的直接 V4L2/TCP 启动命令不能直接套用：
-该版本的实机适配使用本仓库现有 ROS2/Dobot 驱动接口。
+可通过 ROS `-r 原话题:=现场话题` 重映射。ROS 入口使用本仓库现有 ROS2/Dobot 驱动接口。
+已有 V4L2/TCP 现场运行环境可使用下述独立入口。
+
+## 已有 V4L2/TCP 运行环境
+
+`tcp_bridge.py` 把原版同济 C++ EKF 接入已核对的现场执行链，保留其 PBVS、
+制动限制器、ServoJ、手眼标定、旋转滤波和停止机制。当前仅替换平移估计与线速度来源；
+尚未实现新的漏检接管或角速度前馈。它要求指定版本的 `realtime_tracker.py` SHA256，
+版本不同直接拒绝启动，不能用于任意旧工程。
+
+```bash
+export TONGJI_LEGACY_PROJECT=/absolute/path/to/verified/visual-servo
+export TONGJI_TCP_MODE=shadow
+bash nova5_tongji/scripts/run_tcp.sh --config /absolute/path/to/verified.yaml \
+  --experiment-dir /absolute/path/to/new-experiment --motion-limiter braking --no-display
+```
+
+Shadow 不允许 `--execute` 或 `--auto-arm`。受控实机试验才使用
+`TONGJI_TCP_MODE=control` 和这两个参数；同一时间只能有一个相机读取者和机械臂指令源。
+初始化或不可信估计产生零反馈参考；新旧位置预测相差超过 30 mm 会停止。
+`tongji.jsonl` 单独记录新估计，旧执行日志的目标估计字段仍来自原估计器，不能混用。
+时间戳仍是图像到达代理，不能宣称完成真实采集时间标定。
+
+`TONGJI_RESPONSE_PROBE=1` 是明确选择的固定靶标诊断模式：6 秒等待、1° 相对姿态偏置
+保持 8 秒、恢复原姿态，26 秒结束。保持 50 cm 配置距离，不直接发送关节阶跃。
+额外限制 TCP 位移 30 mm、单关节累计位移 0.08 rad、参考关节速度范数 0.15 rad/s。
+触发限制即沿原执行链停止；日志为 `response_probe.jsonl`。靶标或传送带在期间移动时，
+该轮不能用于固定目标增益比较。这些边界属于诊断实验，不代表机器人额定安全限制。
+诊断结束会退出控制程序，其内置视频服务随之结束；持续看视频应启动独立只读预览。
 
 ## 机械臂执行入口
 
@@ -138,7 +165,8 @@ bash nova5_tongji/scripts/run_servo.sh --ros-args \
 
 测试覆盖：实际原版 C++ EKF、相机运动解耦、未知线速度、未来像素、角度跨 ±π、
 异常拒绝/时间戳、无重复外推、Nova5 URDF 雅可比、PBVS 适配限幅、QR/ArUco 检测和 HTTP JPEG。
-合成验证不是独立实测真值。现场接口对接、标定迁移、实机运动仍待现场验收。
+合成验证不是独立实测真值。TCP 接口已在 Orin 上进行并行估计和小幅实机试验；
+动态预测收益及 200 ms 回正目标尚未验收。ROS 入口的现场标定和接口仍需单独验收。
 
 许可证：原仓库 MIT；同济子模块保留其 MIT LICENSE 和版权声明。
 来源：[开源文章](https://bbs.robomaster.com/article/803315?source=4)。

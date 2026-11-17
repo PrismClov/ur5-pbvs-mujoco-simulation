@@ -1,0 +1,103 @@
+{
+  "protocol": "Stationary ArUco, 1 degree camera-relative pitch reference for 8 seconds, then return for 8 seconds. One cycle per gain. Existing 0.5 degree rotation deadband retained.",
+  "limitations": [
+    "No independent motion-capture truth; FK uses time-aligned robot feedback with arrival-proxy image times.",
+    "0.1 degree crossing is a response threshold, not pure execution delay.",
+    "Single-cycle comparison does not establish statistical improvement.",
+    "A prior run interrupted by externally moved target is excluded.",
+    "Native predicted velocity sigma exceeds legacy 0.20 m/s feedforward gate in these stationary runs; moving-target feedforward benefit is not validated."
+  ],
+  "decision": "Do not promote gain 0.7: no demonstrated settling-time benefit. Retain original default 0.5. 200 ms recovery is not achieved. Robot stopped, independent camera preview running.",
+  "runs": [
+    {
+      "run": "probe_g0.5_I9qNUq1s",
+      "gain": 0.5,
+      "duration_s": 25.983531073999984,
+      "steps": [
+        {
+          "edge_s": 6.019092546999673,
+          "command_pitch_deg": 1.0,
+          "desired_delta_deg": 0.9750400296860638,
+          "achieved_delta_deg": 0.4654252047729483,
+          "first_0_1deg_s": 0.6427797559999817,
+          "reach_90pct_command_s": null,
+          "reach_90pct_achieved_s": 5.260605078000481,
+          "response_at_200ms_deg": 0.00291508855302039,
+          "response_at_300ms_deg": 0.014663699417679112,
+          "maximum_delta_deg": 0.47175466784228415,
+          "final_error_deg": 0.3155908980982336
+        },
+        {
+          "edge_s": 14.0195225690004,
+          "command_pitch_deg": 0.0,
+          "desired_delta_deg": 0.9520236745065843,
+          "achieved_delta_deg": 0.14320789379860738,
+          "first_0_1deg_s": 0.883865804999914,
+          "reach_90pct_command_s": null,
+          "reach_90pct_achieved_s": 3.161703629999465,
+          "response_at_200ms_deg": 0.003235793829189784,
+          "response_at_300ms_deg": 0.00940038838405048,
+          "maximum_delta_deg": 0.15399888895349342,
+          "final_error_deg": 0.33575259547526815
+        }
+      ],
+      "max_reference_speed_norm_rad_s": 0.02878197374341968,
+      "median_velocity_sigma_m_s": 0.21485356919802062,
+      "nonzero_feedforward_samples": 0,
+      "control_samples": 1301,
+      "image_error_p95_px": 3.2766841510007487,
+      "execution_event_counts": {
+        "camera": 782,
+        "control": 1301,
+        "feedback": 1564,
+        "servo": 1300,
+        "target_prediction": 778
+      }
+    },
+    {
+      "run": "probe_g0.7_e8OnRfpH",
+      "gain": 0.7,
+      "duration_s": 25.994182965999244,
+      "steps": [
+        {
+          "edge_s": 6.014084684999943,
+          "command_pitch_deg": 1.0,
+          "desired_delta_deg": 0.9006310287720627,
+          "achieved_delta_deg": 0.4487909642151371,
+          "first_0_1deg_s": 0.6037807120001162,
+          "reach_90pct_command_s": null,
+          "reach_90pct_achieved_s": 5.557486300999699,
+          "response_at_200ms_deg": -0.002109451745546036,
+          "response_at_300ms_deg": 0.006911467304829382,
+          "maximum_delta_deg": 0.45864558636665853,
+          "final_error_deg": 0.42177325213080896
+        },
+        {
+          "edge_s": 14.011974039999586,
+          "command_pitch_deg": 0.0,
+          "desired_delta_deg": 0.9249080431775657,
+          "achieved_delta_deg": 0.4261444966878206,
+          "first_0_1deg_s": 0.8994556520001424,
+          "reach_90pct_command_s": null,
+          "reach_90pct_achieved_s": 5.486157393999747,
+          "response_at_200ms_deg": -0.002118629920714883,
+          "response_at_300ms_deg": -0.0038656935119482146,
+          "maximum_delta_deg": 0.5272442180915473,
+          "final_error_deg": 0.749311223530237
+        }
+      ],
+      "max_reference_speed_norm_rad_s": 0.03587611646277227,
+      "median_velocity_sigma_m_s": 0.2148716580497848,
+      "nonzero_feedforward_samples": 0,
+      "control_samples": 1302,
+      "image_error_p95_px": 2.8781392284033123,
+      "execution_event_counts": {
+        "camera": 783,
+        "control": 1302,
+        "feedback": 1566,
+        "servo": 1301,
+        "target_prediction": 773
+      }
+    }
+  ]
+}
