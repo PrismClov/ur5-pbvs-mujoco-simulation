@@ -25,6 +25,11 @@ def main():
             if not self.hand_eye_calibrated:raise ValueError('hand-eye calibration required')
             self.native=TongjiTargetTracker()
             self.native_log=(Path(args.experiment_dir)/'tongji.jsonl').open('x')
+            self.scaling=None
+            if os.environ.get('TONGJI_GLOBAL_SPEED_PERCENT'):
+                if mode!='control':raise ValueError('scaling override requires control mode')
+                from .scaling import GlobalScalingOverride
+                self.scaling=GlobalScalingOverride(self.robot,int(os.environ['TONGJI_GLOBAL_SPEED_PERCENT']),args.experiment_dir)
             self.probe=None
             if os.environ.get('TONGJI_PIXEL_PROBE'):
                 if mode!='control' or os.environ.get('TONGJI_RESPONSE_PROBE')=='1':
@@ -74,6 +79,7 @@ def main():
             try:return super().run()
             except ProbeComplete as exc:print(str(exc),flush=True)
             finally:
+                if self.scaling is not None:self.scaling.close()
                 if self.probe is not None:self.probe.close()
                 self.native_log.close();self.native.close()
     runtime.RealtimeTracker=Tracker

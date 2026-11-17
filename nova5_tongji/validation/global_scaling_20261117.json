@@ -1,0 +1,147 @@
+{
+  "date": "2026-11-17",
+  "changed": "Only global SpeedFactor: 20 to 100. Legacy startup joint VelocityRatio and AccelerationRatio retained at 20.",
+  "protocol": "Original gain/ServoJ/vision settings retained within each pair. One trial per setting; no claim of statistical significance. <=5 px error for >=300 ms.",
+  "conclusion": "No consistent improvement in recovery time. 200 ms recovery not achieved. All three trials settled without protection abort.",
+  "final_state": "Tracking stopped, preview running. Global speed remains 100; joint velocity and acceleration ratios remain 20.",
+  "pairs": [
+    {
+      "baseline_20_percent": {
+        "run": "pixel_g1.0_HPnJbvXc",
+        "gain": 1.0,
+        "initial_error_px": 23.063753865849996,
+        "error_at_200ms_px": 23.174962735524762,
+        "first_10pct_reduction_s": 0.520625760999792,
+        "enter_5px_for_300ms_s": 7.22432088900041,
+        "enter_10pct_for_300ms_s": null,
+        "opposite_side_overshoot_px": 0.0,
+        "final_error_px": 2.905049853336715,
+        "max_reference_joint_speed_rad_s": 0.08349288616349317,
+        "result": "settled",
+        "fault": null,
+        "timing": "Control host time paired with image-arrival proxy, not calibrated capture time",
+        "tolerance": "Within 5 px continuously for 300 ms; reported time is band entry"
+      },
+      "global_100_percent": {
+        "run": "pixel_s100_g1.0_t0.2_p30_yoos2uGH",
+        "gain": 1.0,
+        "initial_error_px": 23.36251878557707,
+        "error_at_200ms_px": 23.554355811158555,
+        "first_10pct_reduction_s": 0.5591687679998358,
+        "enter_5px_for_300ms_s": 3.4191037600003256,
+        "enter_10pct_for_300ms_s": null,
+        "opposite_side_overshoot_px": 0.0,
+        "final_error_px": 3.7193174260250386,
+        "max_reference_joint_speed_rad_s": 0.0958405224850907,
+        "result": "settled",
+        "fault": null,
+        "timing": "Control host time paired with image-arrival proxy, not calibrated capture time",
+        "tolerance": "Within 5 px continuously for 300 ms; reported time is band entry"
+      },
+      "feedback_observed_values": {
+        "speed": [
+          100.0
+        ],
+        "velocity_ratio": [
+          20.0
+        ],
+        "acceleration_ratio": [
+          20.0
+        ]
+      },
+      "feedback_records": 31
+    },
+    {
+      "baseline_20_percent": {
+        "run": "pixel_g2.0_FvfPTT3a",
+        "gain": 2.0,
+        "initial_error_px": 23.829849771917928,
+        "error_at_200ms_px": 24.092794560385315,
+        "first_10pct_reduction_s": 0.4999628659998052,
+        "enter_5px_for_300ms_s": 1.0600205909995566,
+        "enter_10pct_for_300ms_s": null,
+        "opposite_side_overshoot_px": 0.0,
+        "final_error_px": 4.0775193619321835,
+        "max_reference_joint_speed_rad_s": 0.19920736841421335,
+        "result": "settled",
+        "fault": null,
+        "timing": "Control host time paired with image-arrival proxy, not calibrated capture time",
+        "tolerance": "Within 5 px continuously for 300 ms; reported time is band entry"
+      },
+      "global_100_percent": {
+        "run": "pixel_s100_g2.0_t0.2_p30_jCNm9k6l",
+        "gain": 2.0,
+        "initial_error_px": 23.23194980555629,
+        "error_at_200ms_px": 23.361044982917207,
+        "first_10pct_reduction_s": 0.5149009229999137,
+        "enter_5px_for_300ms_s": 1.3950400399999126,
+        "enter_10pct_for_300ms_s": null,
+        "opposite_side_overshoot_px": 0.0,
+        "final_error_px": 3.865325502229311,
+        "max_reference_joint_speed_rad_s": 0.14674625557765983,
+        "result": "settled",
+        "fault": null,
+        "timing": "Control host time paired with image-arrival proxy, not calibrated capture time",
+        "tolerance": "Within 5 px continuously for 300 ms; reported time is band entry"
+      },
+      "feedback_observed_values": {
+        "speed": [
+          100.0
+        ],
+        "velocity_ratio": [
+          20.0
+        ],
+        "acceleration_ratio": [
+          20.0
+        ]
+      },
+      "feedback_records": 30
+    },
+    {
+      "baseline_20_percent": {
+        "run": "pixel_g1.0_t0.2_p60_3UEdnYXf",
+        "gain": 1.0,
+        "initial_error_px": 53.54362208500605,
+        "error_at_200ms_px": 53.806954980102915,
+        "first_10pct_reduction_s": 0.5598323919994073,
+        "enter_5px_for_300ms_s": 4.399713279000025,
+        "enter_10pct_for_300ms_s": 4.341035538000142,
+        "opposite_side_overshoot_px": 0.0,
+        "final_error_px": 4.420815927608149,
+        "max_reference_joint_speed_rad_s": 0.14537584529161543,
+        "result": "settled",
+        "fault": null,
+        "timing": "Control host time paired with image-arrival proxy, not calibrated capture time",
+        "tolerance": "Within 5 px continuously for 300 ms; reported time is band entry"
+      },
+      "global_100_percent": {
+        "run": "pixel_s100_g1.0_t0.2_p60_wCSbZD1E",
+        "gain": 1.0,
+        "initial_error_px": 53.526380188847064,
+        "error_at_200ms_px": 53.773021248898544,
+        "first_10pct_reduction_s": 0.5748072740007046,
+        "enter_5px_for_300ms_s": 5.394819004000055,
+        "enter_10pct_for_300ms_s": 4.259647574000155,
+        "opposite_side_overshoot_px": 0.66143798828125,
+        "final_error_px": 2.785237603394225,
+        "max_reference_joint_speed_rad_s": 0.15034246609362936,
+        "result": "settled",
+        "fault": null,
+        "timing": "Control host time paired with image-arrival proxy, not calibrated capture time",
+        "tolerance": "Within 5 px continuously for 300 ms; reported time is band entry"
+      },
+      "feedback_observed_values": {
+        "speed": [
+          100.0
+        ],
+        "velocity_ratio": [
+          20.0
+        ],
+        "acceleration_ratio": [
+          20.0
+        ]
+      },
+      "feedback_records": 37
+    }
+  ]
+}
