@@ -4,8 +4,12 @@
 原版 C++ `tools::ExtendedKalmanFilter`，通过外层适配连接二维码/ArUco、Nova5
 正运动学、手眼标定、PBVS 和 ServoJ。仓库原有仿真与 `nova5_visual_servo` 文件不变。
 
-**当前状态：原版 EKF 已在 Windows 实际编译并接入测试；ROS2 节点、预览和 ServoJ
-适配入口已提供，尚未在 Orin 编译或完成实机闭环验收。不能据此宣称实现了 200 ms 回正。**
+**当前状态：原版 EKF 已在 Windows 和 Orin aarch64 实际编译；ROS2 节点、预览和 ServoJ
+适配入口已提供，尚未完成实机闭环验收。不能据此宣称实现了 200 ms 回正。**
+
+2026-11-17 Orin 验证：13 项中 12 项通过（含 ArUco）；普通 QR 解码测试因系统 OpenCV
+未链接 QUIRC 而失败。需要带 QR 解码能力的 OpenCV 才能使用 `kind=qr`。
+现场原控制程序使用直接 V4L2/TCP，目前与本工程的 ROS2 执行入口尚未接通。
 
 ## 原版保留范围
 
@@ -134,7 +138,7 @@ bash nova5_tongji/scripts/run_servo.sh --ros-args \
 
 测试覆盖：实际原版 C++ EKF、相机运动解耦、未知线速度、未来像素、角度跨 ±π、
 异常拒绝/时间戳、无重复外推、Nova5 URDF 雅可比、PBVS 适配限幅、QR/ArUco 检测和 HTTP JPEG。
-合成验证不是独立实测真值。Orin 构建、ROS 话题对接、标定迁移、实机运动仍待现场验收。
+合成验证不是独立实测真值。现场接口对接、标定迁移、实机运动仍待现场验收。
 
 许可证：原仓库 MIT；同济子模块保留其 MIT LICENSE 和版权声明。
 来源：[开源文章](https://bbs.robomaster.com/article/803315?source=4)。

@@ -123,7 +123,8 @@ class Tests(unittest.TestCase):
 
     def test_aruco_pose_input_and_wrong_id(self):
         dictionary=cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        marker=cv2.aruco.generateImageMarker(dictionary,0,200)
+        marker=(cv2.aruco.generateImageMarker(dictionary,0,200)
+                if hasattr(cv2.aruco,'generateImageMarker') else cv2.aruco.drawMarker(dictionary,0,200))
         image=np.ones((480,640),np.uint8)*255;image[140:340,220:420]=marker
         K=np.array([[500.,0,320],[0,500.,240],[0,0,1]])
         found=detect_pose(image,K,np.zeros(5),.1,'aruco',0)
@@ -131,7 +132,8 @@ class Tests(unittest.TestCase):
         self.assertIsNone(detect_pose(image,K,np.zeros(5),.1,'aruco',1))
 
     def test_qr_pose_input(self):
-        encoded=cv2.QRCodeEncoder_create().encode('nova5-target')
+        encoded=cv2.imread(str(Path(__file__).parent/'fixtures/nova5-target.png'),cv2.IMREAD_GRAYSCALE)
+        self.assertIsNotNone(encoded)
         code=cv2.resize(encoded,(280,280),interpolation=cv2.INTER_NEAREST)
         image=np.ones((480,640),np.uint8)*255;image[100:380,180:460]=code
         K=np.array([[500.,0,320],[0,500.,240],[0,0,1]])
