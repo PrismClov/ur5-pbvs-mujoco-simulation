@@ -1,0 +1,468 @@
+"""Nova5 six-axis adapter driven by the upstream Tongji Aimer.
+
+The upstream Aimer produces yaw/pitch for a pointing axis. This controller
+turns that command into a desired camera pose, keeps the requested standoff,
+and maps the pose error through the official Nova5 URDF Jacobian.
+"""
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from nova5_visual_servo.core import Fault, exp_so3, log_so3, pose, vector
+
+
+@dataclass(frozen=True)
+class TongjiControlConfig:
+    standoff_m: float = 0.40
+    kp_linear: float = 10.0
+    kp_angular: float = 10.0
+    damping: float = 0.04
+    max_cart_linear_m_s: float = 0.20
+    max_cart_angular_rad_s: float = 1.5
+    max_joint_velocity_rad_s: float = 0.8
+    max_joint_acceleration_rad_s2: float = 5.0
+    max_joint_step_rad: float = 0.035
+    max_follow_error_rad: float = 0.15
+    max_visual_age_s: float = 0.15
+    max_feedback_age_s: float = 0.06
+    max_prediction_s: float = 0.20
+    execution_lead_s: float = 0.03
+    bullet_speed_m_s: float = 1000.0
+    align_marker_plane: bool = False
+    align_marker_roll: bool = False
+    normal_smoothing_alpha: float = 0.25
+    min_jacobian_singular_value: float = 0.03
+    twist_smoothing_alpha: float = 0.20
+    min_joint_command_speed_rad_s: float = 0.01
+    reversal_deadband_rad_s: float = 0.04
+    reversal_confirm_cycles: int = 2
+    hold_translation_error_m: float = 0.002
+    resume_translation_error_m: float = 0.0035
+    hold_rotation_error_rad: float = 0.005
+    resume_rotation_error_rad: float = 0.010
+    command_feedback_gain: float = 0.10
+    dt_min_s: float = 0.010
+    dt_max_s: float = 0.040
+
+    def __post_init__(self):
+        positive = (
+            self.standoff_m,
+            self.kp_linear,
+            self.kp_angular,
+            self.damping,
+            self.max_cart_linear_m_s,
+            self.max_cart_angular_rad_s,
+            self.max_joint_velocity_rad_s,
+            self.max_joint_acceleration_rad_s2,
+            self.max_joint_step_rad,
+            self.max_follow_error_rad,
+            self.max_visual_age_s,
+            self.max_feedback_age_s,
+            self.max_prediction_s,
+            self.bullet_speed_m_s,
+            self.min_jacobian_singular_value,
+        )
+        if not np.isfinite(positive).all() or min(positive) <= 0.0:
+            raise ValueError("all controller limits must be finite and positive")
+        if self.execution_lead_s < 0.0 or self.dt_min_s >= self.dt_max_s:
+            raise ValueError("invalid execution lead or control period bounds")
+        if not 0.0 < self.twist_smoothing_alpha <= 1.0:
+            raise ValueError("twist smoothing alpha must be in (0, 1]")
+        if not 0.0 < self.normal_smoothing_alpha <= 1.0:
+            raise ValueError("normal smoothing alpha must be in (0, 1]")
+        if not 0.0 <= self.min_joint_command_speed_rad_s < self.max_joint_velocity_rad_s:
+            raise ValueError("invalid joint command speed deadband")
+        if not self.min_joint_command_speed_rad_s <= self.reversal_deadband_rad_s:
+            raise ValueError("reversal deadband must not be below the static deadband")
+        if self.reversal_confirm_cycles < 1:
+            raise ValueError("reversal confirmation cycles must be positive")
+        if (
+            self.hold_translation_error_m <= 0.0
+            or self.resume_translation_error_m <= self.hold_translation_error_m
+            or self.hold_rotation_error_rad <= 0.0
+            or self.resume_rotation_error_rad <= self.hold_rotation_error_rad
+        ):
+            raise ValueError("invalid target hold hysteresis")
+        if not 0.0 < self.command_feedback_gain <= 1.0:
+            raise ValueError("command feedback gain must be in (0, 1]")
+
+
+def aim_direction(aim):
+    """Convert upstream yaw/down-positive-pitch into a base-frame unit vector."""
+    yaw = float(aim["yaw"])
+    elevation = -float(aim["pitch"])
+    cosine = np.cos(elevation)
+    direction = np.array(
+        [cosine * np.cos(yaw), cosine * np.sin(yaw), np.sin(elevation)],
+        dtype=float,
+    )
+    norm = np.linalg.norm(direction)
+    if not np.isfinite(norm) or norm < 1e-12:
+        raise Fault("Tongji Aimer returned an invalid direction")
+    return direction / norm
+
+
+def desired_camera_pose(
+    target_position,
+    direction,
+    current_rotation,
+    standoff_m,
+    preferred_x=None,
+):
+    """Build a level camera pose whose +Z optical axis points at the target."""
+    target_position = vector(target_position, 3)
+    direction = vector(direction, 3)
+    direction /= np.linalg.norm(direction)
+    current_rotation = pose(np.block(
+        [[current_rotation, np.zeros((3, 1))], [np.zeros((1, 3)), 1.0]]
+    ))[:3, :3]
+
+    reference_x = (
+        current_rotation[:, 0]
+        if preferred_x is None
+        else vector(preferred_x, 3)
+    )
+    x_axis = reference_x - (reference_x @ direction) * direction
+    if np.linalg.norm(x_axis) < 1e-6:
+        up = np.array([0.0, 0.0, 1.0])
+        x_axis = np.cross(up, direction)
+        if np.linalg.norm(x_axis) < 1e-6:
+            x_axis = np.array([1.0, 0.0, 0.0])
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(direction, x_axis)
+    y_axis /= np.linalg.norm(y_axis)
+
+    result = np.eye(4)
+    result[:3, 0] = x_axis
+    result[:3, 1] = y_axis
+    result[:3, 2] = direction
+    result[:3, 3] = target_position - direction * standoff_m
+    return pose(result)
+
+
+def cartesian_step(current_pose, twist, dt):
+    """Apply a bounded Cartesian velocity for one control period."""
+    current = pose(current_pose)
+    twist = vector(twist, 6)
+    if not np.isfinite(dt) or dt <= 0.0:
+        raise ValueError("dt must be positive")
+    result = np.eye(4)
+    result[:3, 3] = current[:3, 3] + twist[:3] * dt
+    result[:3, :3] = exp_so3(twist[3:] * dt) @ current[:3, :3]
+    return pose(result)
+
+
+class TongjiController:
+    """Single-owner controller; callers remain responsible for the hardware send."""
+
+    def __init__(
+        self,
+        config,
+        tracker,
+        aimer,
+        T_EC,
+        model,
+        workspace_ok,
+        q_initial,
+        qd_initial,
+        start_time,
+        joint_lower=None,
+        joint_upper=None,
+    ):
+        self.c = config
+        self.tracker = tracker
+        self.aimer = aimer
+        self.T_EC = pose(T_EC)
+        self.model = model
+        self.workspace_ok = workspace_ok
+        self.q_plan = vector(q_initial, 6).copy()
+        self.v = vector(qd_initial, 6).copy()
+        self.smoothed_twist = None
+        self._goal_sign = np.zeros(6, dtype=int)
+        self._pending_sign = np.zeros(6, dtype=int)
+        self._pending_count = np.zeros(6, dtype=int)
+        self.motion_hold = False
+        self.q_hold_target = None
+        self.filtered_marker_normal = None
+        self.last_time = float(start_time)
+        self.joint_lower = np.asarray(
+            model.lower if joint_lower is None else joint_lower, dtype=float
+        )
+        self.joint_upper = np.asarray(
+            model.upper if joint_upper is None else joint_upper, dtype=float
+        )
+        if (
+            self.joint_lower.shape != (6,)
+            or self.joint_upper.shape != (6,)
+            or np.any(self.joint_lower >= self.joint_upper)
+            or np.any(abs(self.v) > self.c.max_joint_velocity_rad_s)
+        ):
+            raise ValueError("invalid initial joint state")
+        self._check_jacobian_condition(self.q_plan)
+        self.faulted = False
+
+    def tick(self, now, q_actual, qd_actual, feedback_sample_time):
+        if self.faulted:
+            raise Fault("Tongji controller fault latched")
+        try:
+            return self._tick(now, q_actual, qd_actual, feedback_sample_time)
+        except Exception:
+            self.faulted = True
+            raise
+
+    def _tick(self, now, q_actual, qd_actual, feedback_sample_time):
+        c = self.c
+        q = vector(q_actual, 6)
+        qd = vector(qd_actual, 6)
+        self._check_jacobian_condition(q)
+        dt = float(now) - self.last_time
+        if not c.dt_min_s <= dt <= c.dt_max_s:
+            raise Fault("control period outside bounds; no catch-up")
+        if not 0.0 <= now - feedback_sample_time <= c.max_feedback_age_s:
+            raise Fault("stale joint feedback")
+        if self.tracker.t is None or not 0.0 <= now - self.tracker.t <= c.max_visual_age_s:
+            raise Fault("stale vision")
+        if np.any(abs(self.q_plan - q) > c.max_follow_error_rad):
+            raise Fault("command-feedback divergence")
+
+        execution_time = now + c.execution_lead_s
+        if execution_time - self.tracker.t > c.max_prediction_s:
+            raise Fault("Tongji prediction horizon exceeded")
+        estimate = self.tracker.predict_state(execution_time, c.max_prediction_s)
+        if not estimate["usable"]:
+            raise Fault("Tongji target estimate is not usable")
+
+        robot_horizon = execution_time - feedback_sample_time
+        if not 0.0 <= robot_horizon <= c.max_prediction_s:
+            raise Fault("robot prediction horizon exceeded")
+        q_predicted = q + qd * robot_horizon
+        T_BE_predicted = pose(self.model.fk(q_predicted))
+        T_BC_predicted = pose(T_BE_predicted @ self.T_EC)
+
+        aim = self.aimer.aim(
+            self.tracker,
+            execution_time,
+            T_BC_predicted[:3, 3],
+            bullet_speed=c.bullet_speed_m_s,
+        )
+        if aim is None:
+            raise Fault("Tongji Aimer rejected the target")
+        center_direction = aim_direction(aim)
+        direction = center_direction
+        preferred_x = None
+        normal_alignment_error = 0.0
+        marker_normal = None
+        if c.align_marker_plane:
+            marker_rotation = pose(estimate["pose"])[:3, :3]
+            raw_normal = marker_rotation[:, 2].copy()
+            to_camera = T_BC_predicted[:3, 3] - estimate["position"]
+            if raw_normal @ to_camera < 0.0:
+                raw_normal *= -1.0
+            if self.filtered_marker_normal is None:
+                self.filtered_marker_normal = raw_normal
+            else:
+                if self.filtered_marker_normal @ raw_normal < 0.0:
+                    raw_normal *= -1.0
+                normal_alpha = c.normal_smoothing_alpha
+                marker_normal = (
+                    normal_alpha * raw_normal
+                    + (1.0 - normal_alpha) * self.filtered_marker_normal
+                )
+                marker_normal /= np.linalg.norm(marker_normal)
+                self.filtered_marker_normal = marker_normal.copy()
+            marker_normal = self.filtered_marker_normal.copy()
+            normal_direction = -marker_normal
+            direction = normal_direction / np.linalg.norm(normal_direction)
+            if c.align_marker_roll:
+                marker_x = marker_rotation[:, 0]
+                current_x = T_BC_predicted[:3, 0] - (
+                    T_BC_predicted[:3, 0] @ direction
+                ) * direction
+                if np.linalg.norm(current_x) < 1e-6:
+                    preferred_x = marker_x
+                else:
+                    # A square target has a 180-degree roll ambiguity. Pick
+                    # the in-plane marker axis closest to the current roll.
+                    preferred_x = (
+                        marker_x
+                        if marker_x @ current_x >= 0.0
+                        else -marker_x
+                    )
+            normal_alignment_error = float(np.arccos(np.clip(
+                center_direction @ direction, -1.0, 1.0
+            )))
+        T_BC_desired = desired_camera_pose(
+            estimate["position"],
+            direction,
+            T_BC_predicted[:3, :3],
+            c.standoff_m,
+            preferred_x,
+        )
+        T_BE_desired = pose(T_BC_desired @ np.linalg.inv(self.T_EC))
+
+        translation_error = T_BE_desired[:3, 3] - T_BE_predicted[:3, 3]
+        rotation_error = log_so3(
+            T_BE_desired[:3, :3] @ T_BE_predicted[:3, :3].T
+        )
+        error = np.r_[translation_error, rotation_error]
+        inside_hold = (
+            np.linalg.norm(translation_error) <= c.hold_translation_error_m
+            and np.linalg.norm(rotation_error) <= c.hold_rotation_error_rad
+        )
+        outside_resume = (
+            np.linalg.norm(translation_error) >= c.resume_translation_error_m
+            or np.linalg.norm(rotation_error) >= c.resume_rotation_error_rad
+        )
+        if self.motion_hold:
+            if outside_resume:
+                self.motion_hold = False
+                self.q_hold_target = None
+        elif inside_hold:
+            self.motion_hold = True
+            self.q_hold_target = q.copy()
+        twist = np.r_[
+            c.kp_linear * translation_error,
+            c.kp_angular * rotation_error,
+        ]
+        if self.motion_hold:
+            twist[:] = 0.0
+        # Translation feedforward follows the Tongji EKF velocity. The desired
+        # camera position moves with the target while preserving standoff.
+        if not self.motion_hold:
+            twist[:3] += np.asarray(estimate["velocity"], dtype=float)
+        linear_speed = np.linalg.norm(twist[:3])
+        if linear_speed > c.max_cart_linear_m_s:
+            twist[:3] *= c.max_cart_linear_m_s / linear_speed
+        angular_speed = np.linalg.norm(twist[3:])
+        if angular_speed > c.max_cart_angular_rad_s:
+            twist[3:] *= c.max_cart_angular_rad_s / angular_speed
+        if self.smoothed_twist is None:
+            self.smoothed_twist = twist.copy()
+        else:
+            alpha = c.twist_smoothing_alpha
+            self.smoothed_twist = (
+                alpha * twist + (1.0 - alpha) * self.smoothed_twist
+            )
+        twist = self.smoothed_twist
+
+        jacobian = np.asarray(self.model.jac(q_predicted), dtype=float)
+        if jacobian.shape != (6, 6) or not np.isfinite(jacobian).all():
+            raise Fault("invalid Nova5 Jacobian")
+        goal = jacobian.T @ np.linalg.solve(
+            jacobian @ jacobian.T + c.damping**2 * np.eye(6),
+            twist,
+        )
+        goal = np.clip(
+            goal, -c.max_joint_velocity_rad_s, c.max_joint_velocity_rad_s
+        )
+        goal = self._shape_joint_goal(goal)
+        if self.motion_hold:
+            velocity_next = np.zeros(6)
+            q_next = self.q_hold_target.copy()
+        else:
+            velocity_next = self.v + np.clip(
+                goal - self.v,
+                -c.max_joint_acceleration_rad_s2 * dt,
+                c.max_joint_acceleration_rad_s2 * dt,
+            )
+            # Continue a smooth command trajectory, with only a small
+            # correction from encoder feedback. The previous implementation
+            # rebuilt every target from raw feedback and injected sensor noise
+            # directly into ServoJ.
+            q_next = (
+                self.q_plan
+                + 0.5 * (self.v + velocity_next) * dt
+                + c.command_feedback_gain * (q - self.q_plan)
+            )
+            q_next = self.q_plan + np.clip(
+                q_next - self.q_plan,
+                -c.max_joint_step_rad,
+                c.max_joint_step_rad,
+            )
+        for candidate in (q_predicted, q_next):
+            if (
+                not np.isfinite(candidate).all()
+                or np.any(candidate < self.joint_lower)
+                or np.any(candidate > self.joint_upper)
+                or not self.workspace_ok(candidate)
+            ):
+                raise Fault("joint or workspace limit")
+        self._check_jacobian_condition(q_next)
+
+        self.q_plan = q_next
+        self.v = velocity_next
+        self.last_time = float(now)
+        return {
+            "q_plan": q_next.copy(),
+            "v_next": velocity_next.copy(),
+            "qdot_goal": goal.copy(),
+            "error": error,
+            "translation_error_m": float(np.linalg.norm(translation_error)),
+            "rotation_error_rad": float(np.linalg.norm(rotation_error)),
+            "desired_camera": T_BC_desired,
+            "desired_end": T_BE_desired,
+            "aim": aim,
+            "aim_direction": direction,
+            "center_aim_direction": center_direction,
+            "marker_normal": marker_normal,
+            "normal_alignment_error_rad": normal_alignment_error,
+            "motion_hold": self.motion_hold,
+            "cartesian_twist": twist,
+            "execution_time": execution_time,
+            "visual_age": now - self.tracker.t,
+            "feedback_age": now - feedback_sample_time,
+            "velocity_limited": bool(
+                np.any(abs(goal - jacobian.T @ np.linalg.solve(
+                    jacobian @ jacobian.T + c.damping**2 * np.eye(6),
+                    twist,
+                )) > 1e-12)
+            ),
+        }
+
+    def _check_jacobian_condition(self, q):
+        singular_values = np.linalg.svd(
+            np.asarray(self.model.jac(q), dtype=float),
+            compute_uv=False,
+        )
+        if (
+            not np.isfinite(singular_values).all()
+            or singular_values[-1] < self.c.min_jacobian_singular_value
+        ):
+            raise Fault(
+                "Nova5 Jacobian near singularity: "
+                f"min_sv={singular_values[-1]:.5f}"
+            )
+
+    def _shape_joint_goal(self, goal):
+        c = self.c
+        goal = np.asarray(goal, dtype=float).copy()
+        for index, value in enumerate(goal):
+            magnitude = abs(value)
+            if magnitude < c.min_joint_command_speed_rad_s:
+                goal[index] = 0.0
+                continue
+            sign = 1 if value > 0.0 else -1
+            previous = int(self._goal_sign[index])
+            if previous == 0 or sign == previous:
+                self._goal_sign[index] = sign
+                self._pending_sign[index] = 0
+                self._pending_count[index] = 0
+                continue
+            if magnitude >= c.reversal_deadband_rad_s:
+                self._goal_sign[index] = sign
+                self._pending_sign[index] = 0
+                self._pending_count[index] = 0
+                continue
+            if self._pending_sign[index] != sign:
+                self._pending_sign[index] = sign
+                self._pending_count[index] = 1
+            else:
+                self._pending_count[index] += 1
+            if self._pending_count[index] < c.reversal_confirm_cycles:
+                goal[index] = 0.0
+            else:
+                self._goal_sign[index] = sign
+                self._pending_sign[index] = 0
+                self._pending_count[index] = 0
+        return goal

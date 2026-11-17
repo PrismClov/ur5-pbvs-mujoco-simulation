@@ -1,0 +1,11 @@
+# Original Tongji auto_aim::Aimer parameters for a single ArUco marker.
+# Projectile compensation and firing are intentionally not used by the
+# Nova5 adapter. Offsets are zero until a separate camera/servo calibration
+# justifies changing them.
+yaw_offset: 0.0
+pitch_offset: 0.0
+comming_angle: 60.0
+leaving_angle: 20.0
+decision_speed: 8.0
+high_speed_delay_time: 0.0
+low_speed_delay_time: 0.0

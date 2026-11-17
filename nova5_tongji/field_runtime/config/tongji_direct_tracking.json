@@ -1,0 +1,63 @@
+{
+  "T_EC": [
+    [-0.005208227320059617, 0.9991615125863289, -0.04060968030388057, -0.04802473185774506],
+    [-0.9995613666526936, -0.004017756976760895, 0.029341641472069635, 0.037103151034495706],
+    [0.029153879048633813, 0.04074468548260599, 0.9987441724192144, 0.027551521985729892],
+    [0.0, 0.0, 0.0, 1.0]
+  ],
+  "workspace_min": [-1.0, -1.0, -1.0],
+  "workspace_max": [1.0, 1.0, 1.0],
+  "tracker": {
+    "max_gap": 0.15,
+    "max_speed": 1.0,
+    "max_omega": 2.0,
+    "position_std_m": 0.002,
+    "orientation_std_rad": 0.00872664626,
+    "linear_accel_psd_m2_s3": 0.02,
+    "angular_accel_psd_rad2_s3": 0.2
+  },
+  "controller": {
+    "standoff_m": 0.4,
+    "kp_linear": 10.0,
+    "kp_angular": 10.0,
+    "damping": 0.04,
+    "max_cart_linear_m_s": 0.2,
+    "max_cart_angular_rad_s": 1.5,
+    "max_joint_velocity_rad_s": 0.8,
+    "max_joint_acceleration_rad_s2": 5.0,
+    "max_joint_step_rad": 0.035,
+    "max_follow_error_rad": 0.15,
+    "max_visual_age_s": 0.15,
+    "max_feedback_age_s": 0.06,
+    "max_prediction_s": 0.2,
+    "execution_lead_s": 0.03,
+    "bullet_speed_m_s": 1000.0,
+    "align_marker_plane": true,
+    "align_marker_roll": false,
+    "normal_smoothing_alpha": 0.25,
+    "min_jacobian_singular_value": 0.03,
+    "twist_smoothing_alpha": 0.2,
+    "min_joint_command_speed_rad_s": 0.01,
+    "reversal_deadband_rad_s": 0.04,
+    "reversal_confirm_cycles": 2,
+    "hold_translation_error_m": 0.002,
+    "resume_translation_error_m": 0.0035,
+    "hold_rotation_error_rad": 0.005,
+    "resume_rotation_error_rad": 0.01,
+    "command_feedback_gain": 0.1,
+    "dt_min_s": 0.01,
+    "dt_max_s": 0.04
+  },
+  "robot": {
+    "ip": "192.168.5.2",
+    "dashboard_port": 29999,
+    "feedback_port": 30004,
+    "feedback_fps": 60.0,
+    "control_hz": 50.0,
+    "speed_factor": 20,
+    "servo_t_s": 0.02,
+    "aheadtime": 50.0,
+    "gain": 500.0
+  },
+  "command_mode": "servo_j"
+}

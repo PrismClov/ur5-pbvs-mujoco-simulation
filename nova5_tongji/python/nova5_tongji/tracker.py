@@ -35,6 +35,7 @@ class TongjiTargetTracker:
                      position_std_m,orientation_std_rad,max_gap,max_speed,max_omega)
         if not self.handle: raise ValueError('invalid EKF configuration')
         self.t=None; self.last_sequence=None; self.ready=False
+        self.accepted_count=0
         self.v=np.zeros(3); self.w=np.zeros(3); self.R=None
         self.yaw=None; self.nis=0.; self.rejections=0; self.last_status='uninitialized'
         self.orientation_std=orientation_std_rad
@@ -69,8 +70,17 @@ class TongjiTargetTracker:
         state,P,nis,count=self._state(self.t)
         self.v=state[3:6].copy(); self.w=np.array([0.,0.,state[7]])
         self.nis=nis; self.ready=count>=8
+        self.accepted_count=count
         self.last_status='initialized' if code==1 else 'updated'
         return True
+
+    @property
+    def reason(self):
+        if self.t is None:
+            return self.last_status
+        if self.accepted_count < 8:
+            return f'warming:{self.accepted_count}/8'
+        return 'ready'
 
     def _state(self,t):
         if not self.handle: raise RuntimeError('tracker closed')
@@ -109,3 +119,58 @@ class TongjiTargetTracker:
         pixels,_=cv2.projectPoints(point[:3].reshape(1,3),np.zeros(3),np.zeros(3),
                                   np.asarray(K,float),None if distortion is None else np.asarray(distortion,float))
         return pixels.reshape(2)
+
+
+class TongjiAimer:
+    """Binding to the original Tongji ``auto_aim::Aimer``.
+
+    The marker target is expressed relative to the current camera origin.
+    ``bullet_speed`` should be large for line-of-sight visual servoing; this
+    makes the upstream projectile trajectory compensation numerically
+    negligible while retaining the original Aimer implementation.
+    """
+
+    def __init__(self, config):
+        self.lib=C.CDLL(str(library_path()))
+        self.lib.tj_aimer_create.argtypes=[C.c_char_p]
+        self.lib.tj_aimer_create.restype=C.c_void_p
+        self.lib.tj_aimer_destroy.argtypes=[C.c_void_p]
+        self.lib.tj_aimer_destroy.restype=None
+        ptr=C.POINTER(C.c_double)
+        self.lib.tj_aimer_aim.argtypes=[
+            C.c_void_p,C.c_void_p,C.c_double,
+            C.c_double,C.c_double,C.c_double,C.c_double,ptr]
+        self.lib.tj_aimer_aim.restype=C.c_int
+        self.handle=self.lib.tj_aimer_create(str(config).encode())
+        if not self.handle:
+            raise ValueError('failed to load Tongji Aimer config')
+
+    def close(self):
+        if getattr(self,'handle',None):
+            self.lib.tj_aimer_destroy(self.handle)
+            self.handle=None
+
+    def __del__(self):
+        self.close()
+
+    def aim(self, tracker, timestamp, camera_origin, bullet_speed=1000.0):
+        if not self.handle:
+            raise RuntimeError('Aimer closed')
+        if not tracker.handle:
+            raise RuntimeError('tracker closed')
+        origin=np.ascontiguousarray(camera_origin,dtype=np.float64)
+        if origin.shape != (3,) or not np.isfinite(origin).all():
+            raise ValueError('camera_origin must be a finite 3-vector')
+        output=np.empty(8,np.float64)
+        code=self.lib.tj_aimer_aim(
+            self.handle,tracker.handle,float(timestamp),
+            *origin.tolist(),float(bullet_speed),
+            output.ctypes.data_as(C.POINTER(C.c_double)))
+        if code < 0:
+            raise Fault('Tongji Aimer failed')
+        if code == 0:
+            return None
+        return dict(yaw=float(output[0]),pitch=float(output[1]),
+                    target_xyz=output[2:5].copy(),
+                    upstream_armor_xyz=output[5:8].copy(),
+                    model='sp_vision_25_auto_aim_aimer')

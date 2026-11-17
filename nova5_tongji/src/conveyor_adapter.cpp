@@ -1,9 +1,18 @@
 // Single-marker observation/motion adapter; upstream EKF implementation is unchanged.
 #include "tools/extended_kalman_filter.hpp"
+#include "tasks/auto_aim/aimer.hpp"
+#include "tasks/auto_aim/armor.hpp"
+#include "tasks/auto_aim/target.hpp"
+#include "tools/math_tools.hpp"
+#include <opencv2/core.hpp>
 #include <Eigen/Geometry>
 #include <cmath>
+#include <filesystem>
+#include <cstdio>
+#include <list>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 #ifdef _WIN32
 #define API extern "C" __declspec(dllexport)
@@ -87,6 +96,16 @@ struct Filter {
     ekf=std::move(candidate);time=t;count++;return 2;
   }
 };
+
+struct AimerController {
+  auto_aim::Aimer aimer;
+  explicit AimerController(const char* config) : aimer([&] {
+    if(!config || !*config) throw std::invalid_argument("missing Aimer config");
+    // Upstream's logger lazily creates a file sink under ``logs``.
+    std::filesystem::create_directories("logs");
+    return config;
+  }()) {}
+};
 }
 
 API void* tj_create(double a,double b,double p,double r,double g,double v,double w) {
@@ -106,5 +125,67 @@ API int tj_predict(void* ptr,double t,double* state,double* covariance,double* n
     Eigen::Map<Eigen::Matrix<double,8,8,Eigen::RowMajor>> output_covariance(covariance);
     output_covariance=result.P;
     *nis=f.nis;*count=f.count;return 0;
+  } catch(...) {return -1;}
+}
+API void* tj_aimer_create(const char* config_path) {
+  try {return new AimerController(config_path);} catch(...) {return nullptr;}
+}
+API void tj_aimer_destroy(void* ptr) { delete static_cast<AimerController*>(ptr); }
+API int tj_aimer_aim(
+  void* controller_ptr, void* filter_ptr, double t,
+  double origin_x, double origin_y, double origin_z,
+  double bullet_speed, double* yaw_pitch) {
+  if(!controller_ptr||!filter_ptr||!yaw_pitch||!std::isfinite(t)
+     ||!std::isfinite(origin_x)||!std::isfinite(origin_y)||!std::isfinite(origin_z)
+     ||!std::isfinite(bullet_speed)||bullet_speed<=0)
+    return -1;
+  try {
+    auto& controller=*static_cast<AimerController*>(controller_ptr);
+    auto& filter=*static_cast<Filter*>(filter_ptr);
+    auto predicted=filter.future(t);
+    if(std::getenv("TONGJI_AIM_DEBUG"))
+      std::fprintf(
+        stderr,"aim debug t=%.9f x0=%.9f x1=%.9f x2=%.9f x3=%.9f x4=%.9f x5=%.9f\n",
+        t,predicted.x[0],predicted.x[1],predicted.x[2],predicted.x[3],
+        predicted.x[4],predicted.x[5]);
+    Eigen::Vector3d xyz{
+      predicted.x[0]-origin_x,predicted.x[1]-origin_y,predicted.x[2]-origin_z};
+    if(xyz.head<2>().norm()<1e-9) xyz.x()=1e-9;
+    yaw_pitch[2]=xyz.x();
+    yaw_pitch[3]=xyz.y();
+    yaw_pitch[4]=xyz.z();
+
+    // The upstream Aimer accepts an auto_aim::Target. Build a zero-radius,
+    // one-marker target at the EKF-predicted position. This does not invoke the
+    // armor-specific four-panel tracking model, but the yaw/pitch command
+    // generator itself is the original upstream implementation.
+    std::vector<cv::Point2f> points{
+      {-1.0F,-1.0F},{1.0F,-1.0F},{1.0F,1.0F},{-1.0F,1.0F}};
+    auto_aim::Armor marker(
+      4,1.0F,cv::Rect(0,0,2,2),points);
+    marker.xyz_in_world=xyz;
+    marker.ypr_in_world=Eigen::Vector3d(0,0,predicted.x[6]);
+    marker.ypd_in_world=tools::xyz2ypd(xyz);
+    marker.color=auto_aim::blue;
+    marker.name=auto_aim::one;
+    marker.type=auto_aim::small;
+    marker.priority=auto_aim::first;
+
+    auto now=std::chrono::steady_clock::now();
+    Eigen::VectorXd P0_dig(11);
+    P0_dig << 0.0025,0.25,0.0025,0.25,0.0025,0.25,
+      0.0025,0.25,1e-8,0,0;
+    auto_aim::Target target(marker,now,0.0,1,P0_dig);
+    auto target_xyza=target.armor_xyza_list().front();
+    yaw_pitch[5]=target_xyza[0];
+    yaw_pitch[6]=target_xyza[1];
+    yaw_pitch[7]=target_xyza[2];
+    std::list<auto_aim::Target> targets{target};
+    auto command=controller.aimer.aim(targets,now,bullet_speed,true);
+    if(!command.control||!std::isfinite(command.yaw)||!std::isfinite(command.pitch))
+      return 0;
+    yaw_pitch[0]=command.yaw;
+    yaw_pitch[1]=command.pitch;
+    return 1;
   } catch(...) {return -1;}
 }

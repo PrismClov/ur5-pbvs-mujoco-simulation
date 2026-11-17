@@ -12,11 +12,28 @@ if(EIGEN_INCLUDE_DIR)
 else()
   find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 endif()
+find_package(OpenCV REQUIRED COMPONENTS core)
+find_package(fmt REQUIRED)
+find_package(spdlog REQUIRED)
+find_package(yaml-cpp REQUIRED)
 # Compile the actual upstream implementation, without source patches or a Python rewrite.
 add_library(tongji_conveyor SHARED src/conveyor_adapter.cpp
-  "${UPSTREAM}/tools/extended_kalman_filter.cpp")
-target_include_directories(tongji_conveyor PRIVATE "${UPSTREAM}")
-target_link_libraries(tongji_conveyor PRIVATE Eigen3::Eigen)
+  "${UPSTREAM}/tools/extended_kalman_filter.cpp"
+  "${UPSTREAM}/tools/logger.cpp"
+  "${UPSTREAM}/tools/math_tools.cpp"
+  "${UPSTREAM}/tools/trajectory.cpp"
+  "${UPSTREAM}/tasks/auto_aim/armor.cpp"
+  "${UPSTREAM}/tasks/auto_aim/target.cpp"
+  "${UPSTREAM}/tasks/auto_aim/aimer.cpp")
+target_include_directories(tongji_conveyor PRIVATE
+  "${UPSTREAM}"
+  ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(tongji_conveyor PRIVATE
+  Eigen3::Eigen
+  ${OpenCV_LIBS}
+  fmt::fmt
+  spdlog::spdlog
+  yaml-cpp)
 set_target_properties(tongji_conveyor PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 if(MINGW)

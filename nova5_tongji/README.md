@@ -1,11 +1,15 @@
 # Nova5 × 同济 SuperPower：传送带标记跟踪
 
+当前发布版本：[`v0.1.0`](RELEASE_NOTES_v0.1.0.md)，首次实现 Nova5 + 同济
+EKF/Aimer 的实时二维码追踪。
+
 独立工程，复用 [同济 sp_vision_25](https://github.com/TongjiSuperPower/sp_vision_25)
 原版 C++ `tools::ExtendedKalmanFilter`，通过外层适配连接二维码/ArUco、Nova5
 正运动学、手眼标定、PBVS 和 ServoJ。仓库原有仿真与 `nova5_visual_servo` 文件不变。
 
-**当前状态：原版 EKF 已在 Windows 和 Orin aarch64 实际编译；ROS2 节点、预览和 ServoJ
-适配入口已提供，尚未完成实机闭环验收。不能据此宣称实现了 200 ms 回正。**
+**当前状态：原版 EKF 和标准自瞄 `Aimer` 已在 Ubuntu 编译并通过单元测试；
+ROS2、预览、PBVS ServoJ 及同济 Aimer/Nova5 六轴适配入口已提供。新的同济控制器入口
+尚未完成实机闭环验收，不能据此宣称实现了 200 ms 回正。**
 
 2026-11-17 Orin 验证：13 项中 12 项通过（含 ArUco）；普通 QR 解码测试因系统 OpenCV
 未链接 QUIRC 而失败。需要带 QR 解码能力的 OpenCV 才能使用 `kind=qr`。
@@ -20,14 +24,21 @@
 | 部分 | 处理 |
 | --- | --- |
 | EKF 状态传播、增益和 Joseph 协方差更新 | 直接使用同济原版实现 |
-| 原装甲板识别、整车旋转模型、云台规划器 | 保存在子模块；二维码执行路径不调用 |
+| 原装甲板识别、整车旋转模型、TinyMPC 规划器 | 保存在子模块；二维码执行路径不调用 |
 | 单标记观测/运动模型 | 新增 `src/conveyor_adapter.cpp` |
 | 相机、正运动学、手眼变换 | 外层适配，使用时间配对关节状态 |
-| 六轴 PBVS、约束、ServoJ | 复用本仓库既有 Nova5 实现 |
+| 原版 `auto_aim::Aimer` yaw/pitch 指令 | 由 `TongjiAimer` 直接调用编译后的上游实现 |
+| yaw/pitch 到 Nova5 六轴 TCP | 新增 `tongji_controller.py`，保持 40 cm 距离并经 Nova5 雅可比发送 |
 
 原版 `Target` 使用旋转中心、半径、多块装甲板等状态，`update()` 中还有取最近三块板
 的循环，因此不能简单设置“装甲板数=1”来处理二维码。原云台 yaw/pitch 规划器也不能直接
 输出六轴关节位置。本工程保留原版供对照，明确增加必要适配，不声称整条自瞄链可原样运行。
+
+“同济控制器”指上游 `tasks/auto_aim/aimer.cpp` 的命令生成路径。上游 TinyMPC
+`Planner` 是离线可行轨迹求解器，官方说明其输入不包含云台实际状态，因此本二维码入口
+不把它标成闭环控制器。当前单标记入口实际调用原版 `Aimer`，关闭弹道与开火语义，
+再把 yaw/pitch 光轴转换成 Nova5 相机位姿。投影弹道使用很大的等效弹速，使重力补偿
+在 0.4 m 处可忽略；这是明确的光轴伺服适配，不是发射控制。
 
 ## 模型
 
@@ -245,6 +256,43 @@ ros2 run ibvs_ur5 nova5_low_speed_executor.py \
 `/nova5_ibvs/start_execution`。前馈只补偿观测到的目标速度，不等于替代位置闭环。
 
 ## 机械臂执行入口
+
+### 同济 Aimer + Nova5 六轴控制器
+
+该入口位于本目录，复用原版同济 EKF 和 `Aimer`；官方 Dobot Python SDK 只作为
+50 Hz 传输层。启动前必须关闭 `dobot_bringup_v4`，否则 29999/30004 端口会冲突。
+D435i 相机和 `real_tag_tracker.py` 应已运行，并在 `/tag_tracker/pose_camera`
+发布 ID 0、边长 100 mm 的 ArUco 位姿。
+
+先做不连接机械臂的配置检查：
+
+```bash
+bash nova5_tongji/scripts/run_tongji_controller.sh
+```
+
+确认二维码在工作空间内、机械臂周围无遮挡后，再显式启用运动：
+
+```bash
+bash nova5_tongji/scripts/run_tongji_controller.sh \
+  --execute \
+  --duration 30 \
+  --output-log /home/clover/ur_ws/ibvs_rm65/runtime/tongji_controller.jsonl
+```
+
+该入口等待同济 EKF 收敛后才建立控制器；视觉、反馈、预测、关节、工作空间或跟随
+误差任一失效都会调用 `Stop()`。默认控制周期为 50 Hz、相机到标记目标距离为
+0.40 m、关节速度上限为 0.8 rad/s，并使用笛卡尔小步 `ServoP`。参数在
+`nova5_tongji/field_runtime/config/tongji_direct_tracking.json`，Aimer 参数在
+`nova5_tongji/field_runtime/config/tongji_marker_aimer.yaml`。
+
+`Aimer` 只提供指向，不负责机械臂跟随速度；因此 200 ms 回正仍必须实机测量，
+不能由编译或离线测试宣称已达到。首次验证应从小偏移开始，并保留独立硬件急停。
+
+2026-11-17 实机短测：服务周期 `50.078 Hz`、0 次超期，视觉无断流。7.7 cm /
+20.3° 初始误差的关节速度伺服首轮用了约 2.64 s 进入 1 cm / 1.1°，未达到
+200 ms。随后改为每周期最多 4 mm / 1.7° 的 `ServoP` 小步；静态保持测得
+`49.979 Hz`、0 次超期。`ServoP` 的位移回中尚未在安全姿态下完成验收。
+控制器现在按 Nova5 实时雅可比最小奇异值保护，而不是使用错误的固定 J5=90° 判断。
 
 ```bash
 bash nova5_tongji/scripts/run_servo.sh --ros-args \

@@ -234,12 +234,17 @@ class DobotInterface:
     def feedback_snapshot(self):
         """Return an immutable-by-copy snapshot of the latest feedback."""
         with self.value_lock:
+            joint_position_deg = (
+                None if self.feedData.QActual is None
+                else [float(x) for x in self.feedData.QActual])
             return {
                 "robot_mode": self.feedData.robotMode,
                 "command_id": self.feedData.robotCurrentCommandID,
+                "joint_position_deg": (
+                    None if joint_position_deg is None else joint_position_deg.copy()),
                 "joint_position_rad": (
-                    None if self.feedData.QActual is None
-                    else [float(x) for x in self.feedData.QActual]),
+                    None if joint_position_deg is None
+                    else np.deg2rad(joint_position_deg).tolist()),
                 "tool_vector_mm_deg": (
                     None if self.feedData.ToolVectorActual is None
                     else [float(x) for x in self.feedData.ToolVectorActual]),
