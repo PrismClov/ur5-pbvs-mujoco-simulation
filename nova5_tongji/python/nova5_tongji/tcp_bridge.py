@@ -26,6 +26,12 @@ def main():
             self.native=TongjiTargetTracker()
             self.native_log=(Path(args.experiment_dir)/'tongji.jsonl').open('x')
             self.probe=None
+            if os.environ.get('TONGJI_PIXEL_PROBE'):
+                if mode!='control' or os.environ.get('TONGJI_RESPONSE_PROBE')=='1':
+                    raise ValueError('pixel probe requires exclusive control mode')
+                from .pixel_probe import PixelProbe
+                self.probe=PixelProbe(self.pose,args.experiment_dir,float(os.environ['TONGJI_PIXEL_PROBE']))
+                self.pose.command=self.probe
             if os.environ.get('TONGJI_RESPONSE_PROBE')=='1':
                 if mode!='control':raise ValueError('response probe requires control mode')
                 from .response_probe import ResponseProbe
@@ -34,6 +40,8 @@ def main():
             print('Estimator: original Tongji C++ EKF / TCP '+mode,flush=True)
 
         def _target_pose_for_control(self,q,observation,measurement,update_filter):
+            if self.probe is not None and hasattr(self.probe,'observe'):
+                self.probe.observe(q,observation,measurement,update_filter)
             baseline=super()._target_pose_for_control(q,observation,measurement,update_filter)
             result=(self.pose.desired_camera_to_marker(),np.zeros(3),float('nan'),'prediction_unavailable')
             row=dict(sequence=measurement.sequence,t=measurement.source_monotonic,mode=mode,
