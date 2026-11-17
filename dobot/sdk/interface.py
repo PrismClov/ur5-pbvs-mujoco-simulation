@@ -5,10 +5,9 @@ import transforms3d as t3d
 
 from .dobot_api import DobotApiFeedBack, DobotApiDashboard
 from .ag95_gripper import AG95GripperDobot
-from .damiao_gripper_dobot import DamiaoGripperDobot
 from .do_gripper import DOGripperDobot
 
-_EXTERNAL_GRIPPER_TYPES = (DamiaoGripperDobot,)
+_EXTERNAL_GRIPPER_TYPES = ()
 
 
 import threading
@@ -49,6 +48,7 @@ class DobotInterface:
         joint_command_max_velocity: float = 2.0,
         joint_command_max_dt: float = 0.05,
         joint_command_smoothing_factor: float = 0.1,
+        update_fps: float = 60.0,
     ):
         self.value_lock = threading.Lock()
         self.dashboardPort = dashboardPort
@@ -69,6 +69,19 @@ class DobotInterface:
         self._joint_cmd_last_time: float | None = None
         self._joint_cmd_prev_position: np.ndarray | None = None
         self._joint_cmd_lock = threading.Lock()
+        self.update_fps = float(update_fps)
+        if self.update_fps <= 0:
+            raise ValueError("update_fps must be positive")
+        self._feedback_stop = threading.Event()
+        self._feedback_thread: threading.Thread | None = None
+        self.feedback_count = 0
+        self.feedback_last_monotonic: float | None = None
+        self.feedback_last_duration_s: float | None = None
+        self.feedback_invalid_count = 0
+        self.servo_send_count = 0
+        self.servo_send_last_monotonic: float | None = None
+        self.servo_send_last_duration_s: float | None = None
+        self.servo_send_last_result = None
 
         self.dashboard = DobotApiDashboard(ip, dashboardPort)
         self.feedFour = DobotApiFeedBack(ip, feedPortFour)
@@ -111,6 +124,8 @@ class DobotInterface:
                 # DO gripper doesn't support force/velocity control
                 print(f"DO gripper initialized on DO{gripper_do_index}")
             elif gripper_type_lower == "damiao":
+                from .damiao_gripper_dobot import DamiaoGripperDobot
+
                 if damiao_gripper is None:
                     from leapcollect.robots.gripper.damiao import DamiaoGripperConfig
 
@@ -134,15 +149,27 @@ class DobotInterface:
 
         self.feedData = FeedbackItem()
 
-        feed_thread = threading.Thread(target=self.GetFeed)  # 机器状态反馈线程
-        feed_thread.daemon = True
-        feed_thread.start()
+        self._feedback_thread = threading.Thread(
+            target=self.GetFeed,
+            name="dobot-feedback",
+            daemon=True,
+        )
+        self._feedback_thread.start()
 
     def GetFeed(self):
-        # 获取机器人状态
-        update_fps = 60
-        while True:
-            s0 = time.time()
+        """Continuously snapshot robot feedback at ``update_fps``.
+
+        The source remains the robot's own feedback publication rate. This
+        loop only controls how often the latest packet is copied into the
+        process-local snapshot.
+        """
+        period = 1.0 / self.update_fps
+        deadline = time.monotonic()
+        while not self._feedback_stop.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining > 0 and self._feedback_stop.wait(remaining):
+                break
+            s0 = time.monotonic()
             try:
                 feedInfo = self.feedFour.feedBackData()
             except OSError as e:
@@ -165,11 +192,17 @@ class DobotInterface:
                         self.feedData.ToolVectorActual = feedInfo['ToolVectorActual'][0]
                         self.feedData.ActualTCPForce = feedInfo['ActualTCPForce'][0]
                         self.feedData.MActual = feedInfo['MActual'][0]
-
-            time_diff = time.time() - s0
-            sleep_time = 1 / update_fps - time_diff
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+                        self.feedback_count += 1
+                        self.feedback_last_monotonic = time.monotonic()
+                        self.feedback_last_duration_s = (
+                            self.feedback_last_monotonic - s0)
+                    else:
+                        self.feedback_invalid_count += 1
+            deadline += period
+            now = time.monotonic()
+            if deadline <= now:
+                missed = int((now - deadline) / period) + 1
+                deadline += missed * period
 
     def parseResultId(self, valueRecv):
         # 解析返回值，确保机器人在 TCP 控制模式
@@ -180,7 +213,8 @@ class DobotInterface:
     
     def get_end_pose(self):
         """Return current TCP pose as ``[x, y, z, rx, ry, rz]`` (metres, sxyz Euler radians)."""
-        nums = self.feedData.ToolVectorActual
+        with self.value_lock:
+            nums = self.feedData.ToolVectorActual
         if nums is None:
             return None
         end_pose_arr = np.array([float(x) for x in nums])
@@ -189,12 +223,30 @@ class DobotInterface:
         return np.concatenate([translation, euler_rad])
 
     def get_joint_position(self):
-        nums = self.feedData.QActual
+        with self.value_lock:
+            nums = self.feedData.QActual
         if nums is not None:
             joints = [float(x) for x in nums]
             joints_rad = np.deg2rad(joints)
             return joints_rad.tolist()
         return None
+
+    def feedback_snapshot(self):
+        """Return an immutable-by-copy snapshot of the latest feedback."""
+        with self.value_lock:
+            return {
+                "robot_mode": self.feedData.robotMode,
+                "command_id": self.feedData.robotCurrentCommandID,
+                "joint_position_rad": (
+                    None if self.feedData.QActual is None
+                    else [float(x) for x in self.feedData.QActual]),
+                "tool_vector_mm_deg": (
+                    None if self.feedData.ToolVectorActual is None
+                    else [float(x) for x in self.feedData.ToolVectorActual]),
+                "monotonic": self.feedback_last_monotonic,
+                "feedback_count": self.feedback_count,
+                "loop_period_s": self.feedback_last_duration_s,
+            }
     
     def get_gripper_position(self):
         """Return gripper position (normalized 0--1).
@@ -245,7 +297,8 @@ class DobotInterface:
 
         goal_joint_deg = np.rad2deg(limited_position)
         j1, j2, j3, j4, j5, j6 = goal_joint_deg.tolist()
-        self.dashboard.ServoJ(
+        send_started = time.monotonic()
+        result = self.dashboard.ServoJ(
             j1,
             j2,
             j3,
@@ -256,6 +309,11 @@ class DobotInterface:
             self.aheadtime if aheadtime is None else aheadtime,
             self.gain if gain is None else gain,
         )
+        send_finished = time.monotonic()
+        self.servo_send_count += 1
+        self.servo_send_last_monotonic = send_finished
+        self.servo_send_last_duration_s = send_finished - send_started
+        self.servo_send_last_result = result
         return limited_position.tolist()
 
     def set_pose(self, pose_quat, position_tolerance=0.005, orientation_tolerance=0.01, timeout=10.0):
@@ -340,6 +398,11 @@ class DobotInterface:
         # self.gripper.set_vel(self.gripper_velocity)
 
     def disconnect(self):
+        self._feedback_stop.set()
+        thread = self._feedback_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._feedback_thread = None
         if isinstance(self.gripper, _EXTERNAL_GRIPPER_TYPES):
             if getattr(self.gripper, "_owns_bus", True):
                 self.gripper.close()

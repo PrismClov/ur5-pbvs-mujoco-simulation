@@ -234,12 +234,14 @@ class DobotApi:
         """
         Close the port
         """
-        if (self.socket_dobot != 0):
+        if self.socket_dobot not in (0, None):
             try:
                 self.socket_dobot.shutdown(socket.SHUT_RDWR)
                 self.socket_dobot.close()
             except socket.error as e:
                 print(f"Error while closing socket: {e}")
+            finally:
+                self.socket_dobot = 0
 
     def sendRecvMsg(self, string, timeout=None):
         """

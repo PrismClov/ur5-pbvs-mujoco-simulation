@@ -1,0 +1,10 @@
+{
+  "requested_read_hz": 60.0,
+  "received_packets": 301,
+  "invalid_reads": 0,
+  "duration_s": 5.006264834999456,
+  "actual_feedback_hz": 60.1246657779008,
+  "period_p50_ms": 17.00028349978311,
+  "period_p95_ms": 24.596571999973094,
+  "period_max_ms": 26.180011000178638
+}

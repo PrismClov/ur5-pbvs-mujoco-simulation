@@ -188,6 +188,7 @@ class DobotCR5RobotConfig(RobotConfig):
     servo_t: float = 0.2
     aheadtime: int = 50
     gain: int = 500
+    feedback_fps: float = 60.0
     gripper_type: str | None = None
     gripper_force: int = 80
     gripper_velocity: int = 500
@@ -429,6 +430,7 @@ class DobotCR5Robot(Robot):
             t=self.config.servo_t,
             aheadtime=self.config.aheadtime,
             gain=self.config.gain,
+            update_fps=self.config.feedback_fps,
             gripper_type=self.config.gripper_type,
             gripper_force=self.config.gripper_force,
             gripper_velocity=self.config.gripper_velocity,

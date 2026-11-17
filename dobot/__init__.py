@@ -1,23 +1,13 @@
-"""Dobot 实现：LeRobot ``Robot`` 封装（``dobot_cr5*``）与厂商 SDK（``sdk``）。
+"""Dobot SDK and optional LeRobot wrappers.
 
-LeRobot ``make_device_from_device_class`` 通过配置类的父包查找
-``<ConfigClassName 去掉 ``Config``>`` 设备类（见
-``lerobot/utils/import_utils.py``），因此本包 re-export 三个 ``Robot`` 类。
+The vendor SDK under :mod:`dobot.sdk` must remain importable on machines that
+do not have the optional LeRobot dependencies installed. Robot wrappers are
+therefore loaded lazily on first attribute access.
 """
 
 from __future__ import annotations
 
-from .dobot_cr5 import DobotCR5Robot, DobotCR5RobotConfig
-from .dobot_cr5_dual import (
-    DobotCR5ArmSubConfig,
-    DobotCR5DualArmRobot,
-    DobotCR5DualArmRobotConfig,
-)
-from .dobot_cr5_sim import DobotCR5SimRobot, DobotCR5SimRobotConfig
-from .dobot_cr5_sim_dual import (
-    DobotCR5SimDualArmRobot,
-    DobotCR5SimDualArmRobotConfig,
-)
+from importlib import import_module
 
 __all__ = [
     "DobotCR5Robot",
@@ -30,3 +20,28 @@ __all__ = [
     "DobotCR5SimDualArmRobot",
     "DobotCR5SimDualArmRobotConfig",
 ]
+
+_LAZY_EXPORTS = {
+    "DobotCR5Robot": (".dobot_cr5", "DobotCR5Robot"),
+    "DobotCR5RobotConfig": (".dobot_cr5", "DobotCR5RobotConfig"),
+    "DobotCR5ArmSubConfig": (".dobot_cr5_dual", "DobotCR5ArmSubConfig"),
+    "DobotCR5DualArmRobot": (".dobot_cr5_dual", "DobotCR5DualArmRobot"),
+    "DobotCR5DualArmRobotConfig": (
+        ".dobot_cr5_dual", "DobotCR5DualArmRobotConfig"),
+    "DobotCR5SimRobot": (".dobot_cr5_sim", "DobotCR5SimRobot"),
+    "DobotCR5SimRobotConfig": (".dobot_cr5_sim", "DobotCR5SimRobotConfig"),
+    "DobotCR5SimDualArmRobot": (
+        ".dobot_cr5_sim_dual", "DobotCR5SimDualArmRobot"),
+    "DobotCR5SimDualArmRobotConfig": (
+        ".dobot_cr5_sim_dual", "DobotCR5SimDualArmRobotConfig"),
+}
+
+
+def __getattr__(name: str):
+    try:
+        module_name, symbol = _LAZY_EXPORTS[name]
+    except KeyError as exc:
+        raise AttributeError(name) from exc
+    value = getattr(import_module(module_name, __name__), symbol)
+    globals()[name] = value
+    return value
