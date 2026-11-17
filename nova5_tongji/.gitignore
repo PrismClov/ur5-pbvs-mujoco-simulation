@@ -1,0 +1,6 @@
+build/
+output/
+config/site.local.json
+site.local.json
+__pycache__/
+*.py[cod]

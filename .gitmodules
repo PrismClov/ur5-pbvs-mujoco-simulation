@@ -1,0 +1,3 @@
+[submodule "nova5_tongji/third_party/sp_vision_25"]
+	path = nova5_tongji/third_party/sp_vision_25
+	url = https://github.com/TongjiSuperPower/sp_vision_25.git

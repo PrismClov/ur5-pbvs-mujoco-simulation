@@ -1,5 +1,8 @@
 # ur5-pbvs-mujoco-simulation
 
+新增独立工程：[Nova5 × 同济 SuperPower 传送带标记跟踪](nova5_tongji/README.md)。
+保留上游源码，复用原版 C++ EKF，外接二维码/ArUco 与 Nova5；实机闭环仍待验收。
+
 UR5e eye-in-hand visual servoing and grasping simulation in MuJoCo with AprilTag, PBVS, MPC, and Pinocchio.
 
 ## 项目简介
