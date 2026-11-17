@@ -41,5 +41,22 @@ controller source. `set_joints()` owns no timer; the fixed-rate scheduler in
 `dobot/sdk/realtime.py` invokes it. `servo_t` remains the robot motion-time
 parameter and is not the Python loop period.
 
-The visual PBVS callback is not yet connected to this direct backend. The
-benchmark above establishes the communication and scheduling layer first.
+## Direct visual tracking
+
+`direct_tracking.py` connects `/tag_tracker/pose_camera` to the existing
+ESKF/PBVS controller and sends its 50 Hz joint target through `set_joints()`.
+It does not start `dobot_bringup_v4`.
+
+```bash
+PYTHONPATH="$PWD" .venv/bin/python -m dobot.direct_tracking \
+  --execute --ip 192.168.5.2 \
+  --control-hz 50 --feedback-fps 60 \
+  --speed 20 --servo-t 0.02 --aheadtime 50 --gain 500 \
+  --duration 30 \
+  --output dobot/validation/direct_tracking_run.json
+```
+
+The D435i camera and `real_tag_tracker.py` must already be running. The node
+waits until the ESKF is ready, then starts the fixed-rate loop. A missing or
+stale target, joint/workspace violation, tracker fault, or loop exception
+calls `Stop()` before disconnecting.

@@ -1,0 +1,18 @@
+{
+  "control": {
+    "requested_hz": 50.0,
+    "ticks": 251,
+    "duration_s": 5.000324019999425,
+    "actual_hz": 50.19674705000994,
+    "deadlines_missed": 0,
+    "max_lateness_s": 0.0,
+    "step_duration_p50_s": 0.00013914999999542488,
+    "step_duration_p95_s": 0.00023536800017609494
+  },
+  "servo_send_count": 251,
+  "servo_send_duration_p50_s": 6.140100049378816e-05,
+  "servo_send_duration_max_s": 0.0017251760000362992,
+  "feedback_packets": 300,
+  "feedback_duration_s": 5.00254880600005,
+  "feedback_hz": 59.96942991144443
+}
