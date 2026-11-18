@@ -1,15 +1,15 @@
 # Nova5 × 同济 SuperPower：传送带标记跟踪
 
-当前发布版本：[`v0.1.0`](RELEASE_NOTES_v0.1.0.md)，首次实现 Nova5 + 同济
-EKF/Aimer 的实时二维码追踪。
+当前发布版本：[`v0.1.1`](RELEASE_NOTES_v0.1.1.md)，基于首次实时追踪实现完成
+关节抖动修复，并已获得现场“不再抖动”确认。
 
 独立工程，复用 [同济 sp_vision_25](https://github.com/TongjiSuperPower/sp_vision_25)
 原版 C++ `tools::ExtendedKalmanFilter`，通过外层适配连接二维码/ArUco、Nova5
 正运动学、手眼标定、PBVS 和 ServoJ。仓库原有仿真与 `nova5_visual_servo` 文件不变。
 
 **当前状态：原版 EKF 和标准自瞄 `Aimer` 已在 Ubuntu 编译并通过单元测试；
-ROS2、预览、PBVS ServoJ 及同济 Aimer/Nova5 六轴适配入口已提供。新的同济控制器入口
-尚未完成实机闭环验收，不能据此宣称实现了 200 ms 回正。**
+同济 Aimer/Nova5 六轴实时 `ServoJ` 追踪已在实体 Nova5 + D435i 上运行，最新版本
+经现场确认不再出现明显关节抖动。200 ms 回正仍未作为稳定指标验收。**
 
 2026-11-17 Orin 验证：13 项中 12 项通过（含 ArUco）；普通 QR 解码测试因系统 OpenCV
 未链接 QUIRC 而失败。需要带 QR 解码能力的 OpenCV 才能使用 `kind=qr`。
