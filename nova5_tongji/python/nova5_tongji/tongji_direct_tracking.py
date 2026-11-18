@@ -23,6 +23,7 @@ from .tongji_controller import (
     TongjiController,
     cartesian_step,
 )
+from .pose_return import return_to_joint_pose, should_return_to_initial
 from .tracker import TongjiAimer, TongjiTargetTracker
 
 
@@ -55,13 +56,29 @@ class MarkerPoseTracker(TargetTracker):
             super().__init__(*self._initial_args, **self._initial_kwargs)
             self.accepted_count = 0
             self.warmup_restarts += 1
-        accepted = super().update(seq, exposure_time, T_BE_at_exposure, T_EC, T_CQ)
+        try:
+            accepted = super().update(
+                seq, exposure_time, T_BE_at_exposure, T_EC, T_CQ
+            )
+        except Fault as exc:
+            if self.ready:
+                raise
+            self.reset()
+            self.warmup_restarts += 1
+            self.reason = f"warmup restart: {exc}"
+            return False
         if accepted:
             self.accepted_count += 1
             self.ready = self.accepted_count >= self.warmup_updates
             if not self.ready:
                 self.reason = "warming up"
         return accepted
+
+    def reset(self):
+        """Discard all target history before acquiring a new tracking cycle."""
+        super().__init__(*self._initial_args, **self._initial_kwargs)
+        self.accepted_count = 0
+        self.warmup_restarts = 0
 
     def predict_state(self, t, max_horizon):
         state = super().predict_state(t, max_horizon)
@@ -171,6 +188,8 @@ def main():
         controller["upright_marker"] = args.upright
     if controller.get("upright_marker") and args.ekf != "12d":
         raise ValueError("upright tracking requires --ekf 12d")
+    target_loss_return_settings = settings.get("target_loss_return", {})
+    closed_loop_settings = settings.get("closed_loop", {})
     if not args.execute:
         print(json.dumps({
             "mode": "dry-run",
@@ -180,6 +199,8 @@ def main():
             "pose_topic": args.pose_topic,
             "controller": settings["controller"],
             "robot": settings["robot"],
+            "target_loss_return": target_loss_return_settings,
+            "closed_loop": closed_loop_settings,
         }, indent=2))
         return 0
 
@@ -230,6 +251,9 @@ def main():
     if command_mode not in ("servo_j", "servo_p"):
         raise ValueError(f"unsupported command mode: {command_mode}")
 
+    initial_q = None
+    target_loss_return_triggered = False
+    target_loss_return_report = None
     rclpy.init()
     node = Node("nova5_tongji_direct_tracking")
     stop_event = threading.Event()
@@ -296,7 +320,6 @@ def main():
                     observations.write(json.dumps(row, allow_nan=False) + "\n")
         except Exception as exc:
             state["callback_error"] = f"{type(exc).__name__}: {exc}"
-            stop_event.set()
 
     node.create_subscription(PoseStamped, args.pose_topic, target_callback, 1)
     ros_thread = threading.Thread(
@@ -447,38 +470,165 @@ def main():
                 f"{acknowledgement}"
             )
 
+    active_cycle_stop = {"event": None}
+
+    def request_stop():
+        stop_event.set()
+        cycle_stop = active_cycle_stop["event"]
+        if cycle_stop is not None:
+            cycle_stop.set()
+
     def handle_signal(signum, frame):
         del signum, frame
-        stop_event.set()
+        request_stop()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
     timer = None
     if args.duration > 0.0:
-        timer = threading.Timer(args.duration, stop_event.set)
+        timer = threading.Timer(args.duration, request_stop)
         timer.start()
 
     stats = None
     error = None
     accepted_count = 0
+    cycle_records = []
+    cycle_index = 0
+    closed_loop = bool(closed_loop_settings.get("enabled", False))
     try:
-        deadline = time.monotonic() + 10.0
-        while not stop_event.is_set() and not tracker.ready:
-            if time.monotonic() > deadline:
+        feedback_deadline = time.monotonic() + 3.0
+        while initial_q is None and not stop_event.is_set():
+            current_q = transport.get_joint_position()
+            if current_q is not None:
+                initial_q = np.asarray(current_q, dtype=float).copy()
+                break
+            if time.monotonic() > feedback_deadline:
                 raise RuntimeError(
-                    f"no usable target on {args.pose_topic}: {tracker.reason}"
+                    "target-loss return baseline unavailable: no joint feedback"
                 )
-            time.sleep(0.05)
-        if state["callback_error"] is not None:
-            raise RuntimeError(state["callback_error"])
-        if not tracker.ready:
-            raise RuntimeError(f"no usable target: {tracker.reason}")
-        stats = run_control_loop(
-            control_step,
-            stop_event,
-            control_hz=control_hz,
-            pace_from_start=True,
+            time.sleep(0.02)
+        reacquire_delay_s = float(
+            closed_loop_settings.get("reacquire_delay_s", 1.0)
         )
+        wait_timeout_s = float(
+            closed_loop_settings.get(
+                "wait_for_target_timeout_s", 0.0 if closed_loop else 10.0
+            )
+        )
+        if reacquire_delay_s < 0.0 or wait_timeout_s < 0.0:
+            raise ValueError("closed-loop delays must be nonnegative")
+
+        def reset_tracking_cycle():
+            if not hasattr(tracker, "reset"):
+                raise RuntimeError(
+                    "closed-loop target reacquisition requires tracker.reset()"
+                )
+            with lock:
+                tracker.reset()
+                state["q_previous"] = None
+                state["feedback_previous"] = None
+                state["qdot"] = np.zeros(6)
+                state["controller"] = None
+                state["callback_error"] = None
+                state["servo_pose"] = None
+
+        while not stop_event.is_set():
+            cycle_index += 1
+            if cycle_index > 1:
+                if stop_event.wait(reacquire_delay_s):
+                    break
+                reset_tracking_cycle()
+            wait_started = time.monotonic()
+            while not stop_event.is_set() and not tracker.ready:
+                if state["callback_error"] is not None:
+                    break
+                if (
+                    wait_timeout_s > 0.0
+                    and time.monotonic() - wait_started >= wait_timeout_s
+                ):
+                    break
+                time.sleep(0.05)
+            if stop_event.is_set():
+                break
+            cycle_fault = None
+            if state["callback_error"] is not None:
+                cycle_fault = f"RuntimeError: {state['callback_error']}"
+            elif not tracker.ready:
+                cycle_fault = (
+                    f"RuntimeError: no usable target after "
+                    f"{time.monotonic() - wait_started:.3f}s on "
+                    f"{args.pose_topic}: {tracker.reason}"
+                )
+            else:
+                cycle_stop = threading.Event()
+                active_cycle_stop["event"] = cycle_stop
+                try:
+                    stats = run_control_loop(
+                        control_step,
+                        cycle_stop,
+                        control_hz=control_hz,
+                        pace_from_start=True,
+                    )
+                    if state["callback_error"] is not None:
+                        raise RuntimeError(state["callback_error"])
+                except (Exception, Fault) as exc:
+                    cycle_fault = f"{type(exc).__name__}: {exc}"
+                finally:
+                    active_cycle_stop["event"] = None
+
+            if cycle_fault is None:
+                break
+            return_result = None
+            if (
+                should_return_to_initial(cycle_fault)
+                and target_loss_return_settings.get("enabled", True)
+                and initial_q is not None
+            ):
+                try:
+                    return_result = return_to_joint_pose(
+                        transport,
+                        initial_q,
+                        control_hz=control_hz,
+                        max_speed_rad_s=float(
+                            target_loss_return_settings.get(
+                                "max_joint_speed_rad_s", 0.2
+                            )
+                        ),
+                        max_acceleration_rad_s2=float(
+                            target_loss_return_settings.get(
+                                "max_joint_acceleration_rad_s2", 0.6
+                            )
+                        ),
+                        tolerance_rad=float(
+                            target_loss_return_settings.get(
+                                "tolerance_rad", 0.00873
+                            )
+                        ),
+                        settle_s=float(
+                            target_loss_return_settings.get("settle_s", 0.5)
+                        ),
+                        timeout_s=float(
+                            target_loss_return_settings.get("timeout_s", 20.0)
+                        ),
+                    )
+                except Exception as exc:
+                    return_result = {
+                        "success": False,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                target_loss_return_triggered = True
+                target_loss_return_report = return_result
+                cycle_records.append({
+                    "cycle": cycle_index,
+                    "fault": cycle_fault,
+                    "return": return_result,
+                })
+                if return_result.get("success") and closed_loop:
+                    continue
+                error = cycle_fault
+                break
+            error = cycle_fault
+            break
     except (Exception, Fault) as exc:
         error = f"{type(exc).__name__}: {exc}"
         stop_event.set()
@@ -518,6 +668,23 @@ def main():
         "control_loop": None if stats is None else asdict(stats),
         "command_mode": command_mode,
         "commands": state["commands"],
+        "target_loss_return": {
+            "triggered": target_loss_return_triggered,
+            "trigger_reason": (
+                cycle_records[-1]["fault"] if cycle_records else None
+            ),
+            "count": len(cycle_records),
+            "initial_joint_position_rad": (
+                None if initial_q is None else initial_q.tolist()
+            ),
+            "result": target_loss_return_report,
+            "events": cycle_records,
+        },
+        "closed_loop": {
+            "enabled": closed_loop,
+            "cycles_started": cycle_index,
+            "recovery_events": len(cycle_records),
+        },
         "observation_log": (
             None if observation_path is None else str(observation_path)
         ),

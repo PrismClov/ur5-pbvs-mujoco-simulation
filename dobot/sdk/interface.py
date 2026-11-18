@@ -382,7 +382,18 @@ class DobotInterface:
             self._joint_cmd_prev_position = limited_position
             self._joint_cmd_last_time = now_sec
 
-        goal_joint_deg = np.rad2deg(limited_position)
+        return self.send_joint_target(
+            limited_position, t=t, aheadtime=aheadtime, gain=gain
+        )
+
+    def send_joint_target(self, goal_joint_rad, t=None, aheadtime=None, gain=None):
+        """Send one already safety-limited joint target through ServoJ."""
+        goal_joint_rad = np.asarray(goal_joint_rad, dtype=np.float64).reshape(-1)
+        if goal_joint_rad.size != 6 or not np.isfinite(goal_joint_rad).all():
+            raise AssertionError(
+                f"Dobot should input 6 finite joints, current [{goal_joint_rad.size}]"
+            )
+        goal_joint_deg = np.rad2deg(goal_joint_rad)
         j1, j2, j3, j4, j5, j6 = goal_joint_deg.tolist()
         send_started = time.monotonic()
         result = self.dashboard.ServoJ(
@@ -401,7 +412,7 @@ class DobotInterface:
         self.servo_send_last_monotonic = send_finished
         self.servo_send_last_duration_s = send_finished - send_started
         self.servo_send_last_result = result
-        return limited_position.tolist()
+        return goal_joint_rad.tolist()
 
     def set_pose(self, pose_quat, position_tolerance=0.005, orientation_tolerance=0.01, timeout=10.0):
         """

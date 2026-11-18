@@ -373,7 +373,34 @@ bash nova5_tongji/scripts/run_tongji_controller.sh \
 
 `tracker.max_gap` 为 `0.25 s`，只用于启动阶段容忍 ROS 位姿消息偶发延迟并累计
 EKF 收敛样本；控制器运行后仍使用更严格的 `max_visual_age_s=0.15 s`，视觉失效
-会立即停止。
+会立即停止追踪。
+
+`target_loss_return.enabled=true` 时，控制器会在启动时记录当时的关节位姿。若
+启动阶段始终没有可用目标，或运行中出现 `stale vision`、目标估计不可用、预测
+超时、Jacobian 奇异、关节限位或工作空间保护，则使用不超过 `0.2 rad/s`、
+`0.6 rad/s²` 的五次平滑 ServoJ 轨迹回到该启动位姿，并在最终报告中写入
+`target_loss_return.triggered`、`trigger_reason` 和回位结果。伺服拒绝或反馈
+失效时不继续盲发回位命令。
+
+`closed_loop.enabled=true` 时，回位成功后会清空旧 EKF 状态并等待新的连续
+8 帧目标，然后自动建立新的控制器并继续追踪，不需要重启进程。
+`wait_for_target_timeout_s=0` 表示目标暂时不在画面中时持续等待；
+`--duration` 到期或手动 `Ctrl+C` 才会结束。最终报告中的
+`closed_loop.cycles_started`、`closed_loop.recovery_events` 和
+`target_loss_return.events` 会记录每次停机和重新捕获过程。
+正常到达 `--duration` 或运行中手动 `Ctrl+C` 只停止，不自动回位。
+
+传送带长期运行时使用无限时长；进程只在手动 `Ctrl+C` 时退出：
+
+```bash
+bash nova5_tongji/scripts/run_tongji_controller.sh \
+  --ekf 12d \
+  --upright \
+  --execute \
+  --duration 0 \
+  --observation-log /home/clover/ur_ws/ibvs_rm65/runtime/tongji_12d_observations.jsonl \
+  --output-log /home/clover/ur_ws/ibvs_rm65/runtime/tongji_12d_realtime.jsonl
+```
 
 只检查配置、不连接机械臂：
 

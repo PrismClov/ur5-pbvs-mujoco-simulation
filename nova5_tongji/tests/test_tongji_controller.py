@@ -250,6 +250,71 @@ class TongjiControllerTests(unittest.TestCase):
             )
         self.assertTrue(tracker.ready)
 
+    def test_12d_tracker_reset_discards_stale_history(self):
+        tracker = MarkerPoseTracker(
+            max_gap=0.25,
+            max_speed=1.0,
+            max_omega=2.0,
+            warmup_updates=4,
+        )
+        for index in range(4):
+            tracker.update(index, index * 0.03, np.eye(4), np.eye(4), np.eye(4))
+        self.assertTrue(tracker.ready)
+
+        tracker.reset()
+
+        self.assertFalse(tracker.ready)
+        self.assertEqual(tracker.accepted_count, 0)
+        self.assertIsNone(tracker.t)
+        self.assertTrue(
+            tracker.update(10, 1.0, np.eye(4), np.eye(4), np.eye(4))
+        )
+
+    def test_8d_tracker_reset_recreates_native_ekf(self):
+        tracker = TongjiTargetTracker(max_gap=0.25)
+        self.addCleanup(tracker.close)
+        marker = np.eye(4)
+        marker[:3, 3] = [0.0, 0.0, 0.4]
+        for index in range(8):
+            self.assertTrue(
+                tracker.update(
+                    index,
+                    index * 0.03,
+                    np.eye(4),
+                    np.eye(4),
+                    marker,
+                )
+            )
+
+        tracker.reset()
+
+        self.assertFalse(tracker.ready)
+        self.assertIsNone(tracker.t)
+        self.assertEqual(tracker.accepted_count, 0)
+
+    def test_12d_tracker_discards_bad_speed_during_warmup(self):
+        tracker = MarkerPoseTracker(
+            max_gap=0.25,
+            max_speed=0.01,
+            max_omega=2.0,
+            innovation_gate=1e9,
+            warmup_updates=8,
+        )
+        self.assertTrue(
+            tracker.update(1, 10.0, np.eye(4), np.eye(4), np.eye(4))
+        )
+        far_marker = np.eye(4)
+        far_marker[0, 3] = 1.0
+
+        self.assertFalse(
+            tracker.update(2, 10.03, np.eye(4), np.eye(4), far_marker)
+        )
+
+        self.assertFalse(tracker.ready)
+        self.assertEqual(tracker.accepted_count, 0)
+        self.assertEqual(tracker.warmup_restarts, 1)
+        self.assertIn("warmup restart", tracker.reason)
+
     def test_rejects_near_singular_jacobian(self):
         T_BC = self.model.fk(self.q) @ self.T_EC
         marker = np.eye(4)

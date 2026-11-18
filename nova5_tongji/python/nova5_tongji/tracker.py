@@ -24,6 +24,15 @@ class TongjiTargetTracker:
     def __init__(self, max_gap=.15, max_speed=1., max_omega=2., position_std_m=.006,
                  orientation_std_rad=.03, linear_accel_psd_m2_s3=.09,
                  angular_accel_psd_rad2_s3=.2):
+        self._config = (
+            max_gap,
+            max_speed,
+            max_omega,
+            position_std_m,
+            orientation_std_rad,
+            linear_accel_psd_m2_s3,
+            angular_accel_psd_rad2_s3,
+        )
         self.lib=C.CDLL(str(library_path()))
         ptr=C.POINTER(C.c_double)
         self.lib.tj_create.argtypes=[C.c_double]*7; self.lib.tj_create.restype=C.c_void_p
@@ -47,6 +56,11 @@ class TongjiTargetTracker:
     def close(self):
         if getattr(self,'handle',None):
             self.lib.tj_destroy(self.handle);self.handle=None
+
+    def reset(self):
+        """Recreate the native EKF so a new tracking cycle starts cleanly."""
+        self.close()
+        self.__init__(*self._config)
 
     def __del__(self): self.close()
 
