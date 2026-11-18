@@ -22,6 +22,7 @@ class TongjiControlConfig:
     max_cart_angular_rad_s: float = 1.5
     max_joint_velocity_rad_s: float = 0.8
     max_joint_acceleration_rad_s2: float = 5.0
+    max_joint_jerk_rad_s3: float = 50.0
     max_joint_step_rad: float = 0.035
     max_follow_error_rad: float = 0.15
     max_visual_age_s: float = 0.15
@@ -34,6 +35,7 @@ class TongjiControlConfig:
     upright_marker: bool = False
     normal_smoothing_alpha: float = 0.25
     min_jacobian_singular_value: float = 0.03
+    singularity_slowdown_start: float = 0.09
     joint_limit_margin_rad: float = 0.08
     twist_smoothing_alpha: float = 0.20
     min_joint_command_speed_rad_s: float = 0.01
@@ -47,9 +49,11 @@ class TongjiControlConfig:
     linear_feedforward_gain: float = 1.0
     angular_feedforward_gain: float = 1.0
     angular_prediction_deadband_rad_s: float = 0.15
+    angular_prediction_full_speed_rad_s: float = 0.45
     orientation_smoothing_alpha: float = 0.12
     command_ramp_s: float = 0.0
     hold_entry_velocity_rad_s: float = 0.02
+    hold_entry_deceleration_rad_s2: float = 1.0
     motion_boost_linear_speed_m_s: float = 0.025
     motion_boost_angular_speed_rad_s: float = 0.12
     motion_boost_ramp_s: float = 0.35
@@ -57,6 +61,7 @@ class TongjiControlConfig:
     moving_max_cart_angular_rad_s: float = 1.50
     moving_max_joint_velocity_rad_s: float = 1.10
     moving_max_joint_acceleration_rad_s2: float = 6.0
+    moving_max_joint_jerk_rad_s3: float = 50.0
     moving_max_joint_step_rad: float = 0.040
     lock_static_target: bool = False
     lock_marker_orientation: bool = False
@@ -76,6 +81,7 @@ class TongjiControlConfig:
             self.max_cart_angular_rad_s,
             self.max_joint_velocity_rad_s,
             self.max_joint_acceleration_rad_s2,
+            self.max_joint_jerk_rad_s3,
             self.max_joint_step_rad,
             self.max_follow_error_rad,
             self.max_visual_age_s,
@@ -113,12 +119,21 @@ class TongjiControlConfig:
             raise ValueError("angular feedforward gain must be in [0, 1]")
         if self.angular_prediction_deadband_rad_s < 0.0:
             raise ValueError("angular prediction deadband must be nonnegative")
+        if (
+            self.angular_prediction_full_speed_rad_s
+            <= self.angular_prediction_deadband_rad_s
+        ):
+            raise ValueError(
+                "angular feedforward full speed must exceed the deadband"
+            )
         if not 0.0 < self.orientation_smoothing_alpha <= 1.0:
             raise ValueError("orientation smoothing alpha must be in (0, 1]")
         if self.command_ramp_s < 0.0:
             raise ValueError("command ramp duration must be nonnegative")
         if not 0.0 < self.hold_entry_velocity_rad_s <= self.max_joint_velocity_rad_s:
             raise ValueError("invalid hold entry velocity")
+        if self.hold_entry_deceleration_rad_s2 <= 0.0:
+            raise ValueError("hold entry deceleration must be positive")
         moving_positive = (
             self.motion_boost_linear_speed_m_s,
             self.motion_boost_angular_speed_rad_s,
@@ -127,6 +142,7 @@ class TongjiControlConfig:
             self.moving_max_cart_angular_rad_s,
             self.moving_max_joint_velocity_rad_s,
             self.moving_max_joint_acceleration_rad_s2,
+            self.moving_max_joint_jerk_rad_s3,
             self.moving_max_joint_step_rad,
         )
         if not np.isfinite(moving_positive).all() or min(moving_positive) <= 0.0:
@@ -137,6 +153,8 @@ class TongjiControlConfig:
             or self.moving_max_joint_velocity_rad_s < self.max_joint_velocity_rad_s
             or self.moving_max_joint_acceleration_rad_s2
             < self.max_joint_acceleration_rad_s2
+            or self.moving_max_joint_jerk_rad_s3
+            < self.max_joint_jerk_rad_s3
             or self.moving_max_joint_step_rad < self.max_joint_step_rad
         ):
             raise ValueError("moving-target limits must not be below static limits")
@@ -148,6 +166,10 @@ class TongjiControlConfig:
             raise ValueError("invalid static target lock configuration")
         if self.joint_limit_margin_rad < 0.0:
             raise ValueError("joint limit margin must be nonnegative")
+        if self.singularity_slowdown_start <= self.min_jacobian_singular_value:
+            raise ValueError(
+                "singularity slowdown margin must exceed the hard threshold"
+            )
 
 
 def aim_direction(aim):
@@ -241,6 +263,27 @@ def blend_limit(static_limit, moving_limit, scale):
     return float(static_limit + scale * (moving_limit - static_limit))
 
 
+def angular_feedforward_scale(speed, deadband, full_speed):
+    """Smoothly enable angular prediction without a threshold step."""
+    speed = float(speed)
+    if speed <= deadband:
+        return 0.0
+    if speed >= full_speed:
+        return 1.0
+    progress = (speed - deadband) / (full_speed - deadband)
+    return progress * progress * (3.0 - 2.0 * progress)
+
+
+def singularity_speed_scale(min_sv, hard_limit, slowdown_start):
+    """Reduce commanded speed continuously before reaching a singularity."""
+    if min_sv <= hard_limit:
+        return 0.0
+    if min_sv >= slowdown_start:
+        return 1.0
+    progress = (min_sv - hard_limit) / (slowdown_start - hard_limit)
+    return progress * progress * (3.0 - 2.0 * progress)
+
+
 class TongjiController:
     """Single-owner controller; callers remain responsible for the hardware send."""
 
@@ -266,12 +309,14 @@ class TongjiController:
         self.workspace_ok = workspace_ok
         self.q_plan = vector(q_initial, 6).copy()
         self.v = vector(qd_initial, 6).copy()
+        self.acceleration = np.zeros(6)
         self.smoothed_twist = None
         self._goal_sign = np.zeros(6, dtype=int)
         self._pending_sign = np.zeros(6, dtype=int)
         self._pending_count = np.zeros(6, dtype=int)
         self.motion_hold = False
         self.q_hold_target = None
+        self.target_loss_brake = None
         self.filtered_marker_normal = None
         self.static_target_pose = None
         self.static_target_since = None
@@ -314,6 +359,125 @@ class TongjiController:
         except Exception:
             self.faulted = True
             raise
+
+    def decelerate_tick(
+        self,
+        now,
+        q_actual,
+        qd_actual,
+        feedback_sample_time,
+        max_deceleration_rad_s2,
+    ):
+        """Continue ServoJ with an acceleration-limited stop after vision loss."""
+        c = self.c
+        q = vector(q_actual, 6)
+        qd = vector(qd_actual, 6)
+        dt = float(now) - self.last_time
+        if not c.dt_min_s <= dt <= c.dt_max_s:
+            raise Fault(f"control period {dt*1000:.3f} ms outside bounds; no catch-up")
+        if not 0.0 <= now - feedback_sample_time <= c.max_feedback_age_s:
+            raise Fault("stale joint feedback during target-loss deceleration")
+        max_deceleration = min(
+            c.max_joint_acceleration_rad_s2,
+            float(max_deceleration_rad_s2),
+        )
+        if self.target_loss_brake is None:
+            initial_velocity = self.v.copy()
+            speed = float(np.max(np.abs(initial_velocity)))
+            duration = max(
+                0.4,
+                2.0 * speed / max_deceleration,
+            )
+            self.target_loss_brake = {
+                "started": float(now),
+                "duration": duration,
+                "position": self.q_plan.copy(),
+                "velocity": initial_velocity,
+            }
+        brake = self.target_loss_brake
+        elapsed = max(0.0, float(now) - brake["started"])
+        progress = float(np.clip(elapsed / brake["duration"], 0.0, 1.0))
+        velocity_scale = (
+            1.0
+            - progress
+            + np.sin(2.0 * np.pi * progress) / (2.0 * np.pi)
+        )
+        displacement_scale = (
+            progress
+            - 0.5 * progress**2
+            + (1.0 - np.cos(2.0 * np.pi * progress))
+            / (4.0 * np.pi**2)
+        )
+        velocity_next = brake["velocity"] * velocity_scale
+        target_position = (
+            brake["position"]
+            + brake["velocity"] * brake["duration"] * displacement_scale
+        )
+        q_next = (
+            target_position
+            + c.command_feedback_gain * (q - target_position)
+        )
+        deceleration_step_limit = max(
+            c.max_joint_step_rad,
+            c.moving_max_joint_step_rad,
+        )
+        q_next = self.q_plan + np.clip(
+            q_next - self.q_plan,
+            -deceleration_step_limit,
+            deceleration_step_limit,
+        )
+        if progress >= 1.0:
+            velocity_next[:] = 0.0
+        for candidate in (q, q_next):
+            self._check_joint_and_workspace(candidate)
+        self._check_jacobian_condition(q_next)
+        speed = float(np.linalg.norm(velocity_next))
+        complete = (
+            progress >= 1.0
+            and np.linalg.norm(qd) <= c.hold_entry_velocity_rad_s
+        )
+        self.q_plan = q_next
+        self.v = velocity_next
+        self.last_time = float(now)
+        return {
+            "q_plan": q_next.copy(),
+            "v_next": velocity_next.copy(),
+            "qdot_goal": np.zeros(6),
+            "error": np.zeros(6),
+            "translation_error_m": None,
+            "rotation_error_rad": None,
+            "desired_camera": None,
+            "desired_end": None,
+            "aim": None,
+            "aim_direction": None,
+            "center_aim_direction": None,
+            "marker_normal": None,
+            "normal_alignment_error_rad": None,
+            "motion_hold": speed <= c.hold_entry_velocity_rad_s,
+            "static_target_locked": False,
+            "marker_orientation_locked": False,
+            "cartesian_twist": np.zeros(6),
+            "target_position": None,
+            "target_velocity": None,
+            "target_angular_velocity": None,
+            "control_angular_velocity": None,
+            "angular_prediction_suppressed": True,
+            "motion_boost_scale": 0.0,
+            "effective_limits": {
+                "max_joint_velocity_rad_s": c.max_joint_velocity_rad_s,
+                "max_joint_acceleration_rad_s2": max_deceleration,
+                "max_joint_step_rad": deceleration_step_limit,
+            },
+            "target_loss_deceleration": True,
+            "target_loss_deceleration_complete": complete,
+            "target_loss_deceleration_elapsed_s": elapsed,
+            "target_loss_deceleration_duration_s": brake["duration"],
+            "execution_time": now,
+            "visual_age": None,
+            "visual_receive_age": None,
+            "feedback_age": now - feedback_sample_time,
+            "velocity_limited": False,
+        }
 
     def _tick(self, now, q_actual, qd_actual, feedback_sample_time):
         c = self.c
@@ -404,6 +568,11 @@ class TongjiController:
             c.moving_max_joint_acceleration_rad_s2,
             self.motion_boost_scale,
         )
+        max_joint_jerk = blend_limit(
+            c.max_joint_jerk_rad_s3,
+            c.moving_max_joint_jerk_rad_s3,
+            self.motion_boost_scale,
+        )
         max_joint_step = blend_limit(
             c.max_joint_step_rad,
             c.moving_max_joint_step_rad,
@@ -428,24 +597,16 @@ class TongjiController:
             else:
                 self.static_target_since = None
                 self.static_target_pose = None
-        control_angular_velocity = estimate_angular_velocity.copy()
-        angular_prediction_suppressed = (
-            not c.lock_marker_orientation
-            and np.linalg.norm(estimate_angular_velocity)
-            < c.angular_prediction_deadband_rad_s
+        angular_speed = float(np.linalg.norm(estimate_angular_velocity))
+        angular_scale = (
+            0.0 if c.lock_marker_orientation else angular_feedforward_scale(
+                angular_speed,
+                c.angular_prediction_deadband_rad_s,
+                c.angular_prediction_full_speed_rad_s,
+            )
         )
-        if angular_prediction_suppressed:
-            current_estimate = self.tracker.predict_state(
-                self.tracker.t, c.max_prediction_s
-            )
-            current_pose = pose(
-                current_estimate.get(
-                    "pose", current_estimate.get("T")
-                )
-            )
-            estimate_pose = estimate_pose.copy()
-            estimate_pose[:3, :3] = current_pose[:3, :3]
-            control_angular_velocity[:] = 0.0
+        control_angular_velocity = estimate_angular_velocity * angular_scale
+        angular_prediction_suppressed = angular_scale <= 0.0
 
         robot_horizon = execution_time - feedback_sample_time
         if not 0.0 <= robot_horizon <= c.max_prediction_s:
@@ -453,6 +614,18 @@ class TongjiController:
         q_predicted = q + qd * robot_horizon
         T_BE_predicted = pose(self.model.fk(q_predicted))
         T_BC_predicted = pose(T_BE_predicted @ self.T_EC)
+        singular_values = np.linalg.svd(
+            np.asarray(self.model.jac(q_predicted), dtype=float),
+            compute_uv=False,
+        )
+        singularity_scale = singularity_speed_scale(
+            float(singular_values[-1]),
+            c.min_jacobian_singular_value,
+            c.singularity_slowdown_start,
+        )
+        max_cart_linear *= singularity_scale
+        max_cart_angular *= singularity_scale
+        max_joint_velocity *= singularity_scale
 
         aim = None
         if self.aimer is None:
@@ -603,13 +776,28 @@ class TongjiController:
             goal = np.zeros(6)
         if self.motion_hold:
             velocity_next = np.zeros(6)
+            self.acceleration[:] = 0.0
             q_next = self.q_hold_target.copy()
         else:
-            velocity_next = self.v + np.clip(
-                goal - self.v,
-                -max_joint_acceleration * dt,
-                max_joint_acceleration * dt,
+            velocity_acceleration = (
+                min(
+                    max_joint_acceleration,
+                    c.hold_entry_deceleration_rad_s2,
+                )
+                if stopping_for_hold
+                else max_joint_acceleration
             )
+            desired_acceleration = np.clip(
+                (goal - self.v) / dt,
+                -velocity_acceleration,
+                velocity_acceleration,
+            )
+            acceleration_next = self.acceleration + np.clip(
+                desired_acceleration - self.acceleration,
+                -max_joint_jerk * dt,
+                max_joint_jerk * dt,
+            )
+            velocity_next = self.v + acceleration_next * dt
             # Continue a smooth command trajectory, with only a small
             # correction from encoder feedback. The previous implementation
             # rebuilt every target from raw feedback and injected sensor noise
@@ -628,10 +816,14 @@ class TongjiController:
                 stopping_for_hold
                 and np.linalg.norm(velocity_next)
                 <= c.hold_entry_velocity_rad_s
+                and np.linalg.norm(qd)
+                <= c.hold_entry_velocity_rad_s
             ):
                 velocity_next = np.zeros(6)
+                acceleration_next = np.zeros(6)
                 self.motion_hold = True
                 self.q_hold_target = q_next.copy()
+            self.acceleration = acceleration_next
         for candidate in (q_predicted, q_next):
             self._check_joint_and_workspace(candidate)
         self._check_jacobian_condition(q_next)
@@ -668,12 +860,15 @@ class TongjiController:
             "target_angular_velocity": estimate_angular_velocity.copy(),
             "control_angular_velocity": control_angular_velocity.copy(),
             "angular_prediction_suppressed": angular_prediction_suppressed,
+            "angular_feedforward_scale": angular_scale,
+            "singularity_speed_scale": singularity_scale,
             "motion_boost_scale": self.motion_boost_scale,
             "effective_limits": {
                 "max_cart_linear_m_s": max_cart_linear,
                 "max_cart_angular_rad_s": max_cart_angular,
                 "max_joint_velocity_rad_s": max_joint_velocity,
                 "max_joint_acceleration_rad_s2": max_joint_acceleration,
+                "max_joint_jerk_rad_s3": max_joint_jerk,
                 "max_joint_step_rad": max_joint_step,
             },
             "execution_time": execution_time,

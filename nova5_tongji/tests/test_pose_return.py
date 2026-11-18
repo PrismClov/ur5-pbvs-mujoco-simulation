@@ -37,6 +37,11 @@ class PoseReturnTests(unittest.TestCase):
                 "Fault: estimated target speed outside device configuration"
             )
         )
+        self.assertTrue(
+            should_return_to_initial(
+                "Fault: target loss deceleration timeout"
+            )
+        )
         self.assertFalse(
             should_return_to_initial("Fault: ServoJ rejected at command 10")
         )
@@ -87,6 +92,76 @@ class PoseReturnTests(unittest.TestCase):
         steps = np.linalg.norm(np.diff(commands, axis=0), axis=1)
         self.assertLess(steps[0], steps.max())
         self.assertLess(steps[-1], steps.max())
+
+    def test_return_matches_nonzero_initial_joint_velocity(self):
+        class FakeTransport:
+            def __init__(self):
+                self.position = np.zeros(6)
+                self.commands = []
+                self.servo_send_last_result = "0,{1},ServoJ(...);"
+
+            def get_joint_position(self):
+                return self.position.tolist()
+
+            def send_joint_target(self, command):
+                command = np.asarray(command, dtype=float)
+                self.commands.append(command.copy())
+                self.position = command.copy()
+                return command.tolist()
+
+        transport = FakeTransport()
+        result = return_to_joint_pose(
+            transport,
+            np.full(6, -0.08),
+            control_hz=100.0,
+            max_speed_rad_s=0.6,
+            max_acceleration_rad_s2=2.0,
+            tolerance_rad=0.001,
+            settle_s=0.01,
+            timeout_s=4.0,
+            initial_velocity_rad_s=np.full(6, 0.2),
+        )
+
+        commands = np.asarray(transport.commands)
+        self.assertTrue(result["success"])
+        self.assertGreater(commands[1, 0], commands[0, 0])
+        np.testing.assert_allclose(commands[-1], np.full(6, -0.08), atol=1e-12)
+
+    def test_fast_target_loss_decelerates_before_return(self):
+        class FakeTransport:
+            def __init__(self):
+                self.position = np.zeros(6)
+                self.commands = []
+                self.servo_send_last_result = "0,{1},ServoJ(...);"
+
+            def get_joint_position(self):
+                return self.position.tolist()
+
+            def send_joint_target(self, command):
+                command = np.asarray(command, dtype=float)
+                self.commands.append(command.copy())
+                self.position = command.copy()
+                return command.tolist()
+
+        transport = FakeTransport()
+        result = return_to_joint_pose(
+            transport,
+            np.zeros(6),
+            control_hz=100.0,
+            max_speed_rad_s=0.2,
+            max_acceleration_rad_s2=2.0,
+            tolerance_rad=0.001,
+            settle_s=0.01,
+            timeout_s=5.0,
+            initial_velocity_rad_s=np.full(6, 1.0),
+        )
+
+        commands = np.asarray(transport.commands)
+        velocities = np.diff(commands, axis=0) * 100.0
+        self.assertTrue(result["success"])
+        self.assertGreater(commands[1, 0], 0.0)
+        self.assertLessEqual(np.max(np.abs(velocities)), 1.1)
+        self.assertAlmostEqual(np.max(np.abs(velocities[-1])), 0.0, places=2)
 
 
 if __name__ == "__main__":

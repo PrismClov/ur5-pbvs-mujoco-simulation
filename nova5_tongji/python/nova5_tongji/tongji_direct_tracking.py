@@ -151,6 +151,31 @@ def servo_ack_success(acknowledgement, allow_empty=False):
     return match is not None and int(match.group(1)) == 0
 
 
+def should_decelerate_for_target_loss(
+    callback_error,
+    already_decelerating,
+    receive_age_s,
+    grace_s,
+):
+    return bool(
+        already_decelerating
+        or callback_error is not None
+        or (
+            receive_age_s is not None
+            and receive_age_s >= grace_s
+        )
+    )
+
+
+def target_in_reacquire_zone(reference, current, tolerance_m):
+    if reference is None or current is None:
+        return True
+    return bool(
+        np.linalg.norm(np.asarray(current) - np.asarray(reference))
+        <= tolerance_m
+    )
+
+
 def json_value(value):
     if isinstance(value, np.ndarray):
         return value.tolist()
@@ -268,6 +293,10 @@ def main():
         "callback_error": None,
         "last_output": None,
         "servo_pose": None,
+        "target_loss_decelerating": False,
+        "target_loss_deceleration_started_at": None,
+        "target_loss_zero_since": None,
+        "reacquire_reference_position": None,
     }
 
     def target_callback(message):
@@ -343,7 +372,7 @@ def main():
         )
 
     def control_step():
-        if state["callback_error"] is not None:
+        if state["callback_error"] is not None and state["controller"] is None:
             raise RuntimeError(state["callback_error"])
         snapshot = transport.feedback_snapshot()
         q_list = snapshot["joint_position_rad"]
@@ -370,6 +399,28 @@ def main():
             if state["controller"] is None:
                 if not tracker.ready:
                     return
+                target_estimate = tracker.predict_state(
+                    now, control_settings.max_prediction_s
+                )
+                if not target_estimate["usable"]:
+                    return
+                target_position = np.asarray(
+                    target_estimate["position"], dtype=float
+                )
+                if state["reacquire_reference_position"] is None:
+                    state["reacquire_reference_position"] = (
+                        target_position.copy()
+                    )
+                elif not target_in_reacquire_zone(
+                    state["reacquire_reference_position"],
+                    target_position,
+                    float(
+                        closed_loop_settings.get(
+                            "reacquire_position_tolerance_m", 0.15
+                        )
+                    ),
+                ):
+                    return
                 state["controller"] = TongjiController(
                     control_settings,
                     tracker,
@@ -382,9 +433,42 @@ def main():
                     now,
                 )
                 return
-            output = state["controller"].tick(
-                now, q, state["qdot"], feedback_time
+            receive_time = getattr(tracker, "received_time", tracker.t)
+            deceleration_grace_s = float(
+                target_loss_return_settings.get(
+                    "deceleration_grace_s", 0.06
+                )
             )
+            if (
+                should_decelerate_for_target_loss(
+                    state["callback_error"],
+                    state["target_loss_decelerating"],
+                    now - receive_time,
+                    deceleration_grace_s,
+                )
+            ):
+                if command_mode != "servo_j":
+                    raise Fault(
+                        "target-loss deceleration requires servo_j mode"
+                    )
+                if not state["target_loss_decelerating"]:
+                    state["target_loss_deceleration_started_at"] = now
+                state["target_loss_decelerating"] = True
+                output = state["controller"].decelerate_tick(
+                    now,
+                    q,
+                    state["qdot"],
+                    feedback_time,
+                    float(
+                        target_loss_return_settings.get(
+                            "deceleration_acceleration_rad_s2", 0.6
+                        )
+                    ),
+                )
+            else:
+                output = state["controller"].tick(
+                    now, q, state["qdot"], feedback_time
+                )
 
         if command_mode == "servo_p":
             current_pose = dobot_pose_to_matrix(tool_vector)
@@ -469,8 +553,162 @@ def main():
                 f"ServoJ rejected at command {state['commands']}: "
                 f"{acknowledgement}"
             )
+        if output.get("target_loss_deceleration"):
+            actual_stop_speed = float(
+                target_loss_return_settings.get(
+                    "deceleration_complete_speed_rad_s", 0.02
+                )
+            )
+            deceleration_timeout_s = float(
+                target_loss_return_settings.get(
+                    "deceleration_timeout_s", 3.0
+                )
+            )
+            deceleration_complete = (
+                output.get("target_loss_deceleration_complete")
+                and np.linalg.norm(state["qdot"]) <= actual_stop_speed
+            )
+            post_stop_hold_s = float(
+                target_loss_return_settings.get("post_stop_hold_s", 0.5)
+            )
+            if deceleration_complete:
+                if state["target_loss_zero_since"] is None:
+                    state["target_loss_zero_since"] = now
+                if now - state["target_loss_zero_since"] >= post_stop_hold_s:
+                    raise Fault("stale vision after controlled deceleration")
+            else:
+                state["target_loss_zero_since"] = None
+            started_at = state["target_loss_deceleration_started_at"]
+            if (
+                started_at is not None
+                and now - started_at >= deceleration_timeout_s
+            ):
+                raise Fault("target loss deceleration timeout")
+
+    def stop_current_motion_gracefully():
+        controller = state["controller"]
+        if controller is None or command_mode != "servo_j":
+            return {"performed": False, "reason": "controller not active"}
+        period = 1.0 / control_hz
+        started = time.monotonic()
+        next_tick = started
+        q_previous = state["q_previous"]
+        feedback_previous = state["feedback_previous"]
+        qdot = state["qdot"].copy()
+        max_deceleration = float(
+            target_loss_return_settings.get(
+                "deceleration_acceleration_rad_s2", 1.0
+            )
+        )
+        stop_speed = float(
+            target_loss_return_settings.get(
+                "deceleration_complete_speed_rad_s", 0.02
+            )
+        )
+        settle_s = float(
+            target_loss_return_settings.get("post_stop_hold_s", 0.5)
+        )
+        timeout_s = float(
+            target_loss_return_settings.get("deceleration_timeout_s", 4.0)
+        ) + settle_s
+        settled_since = None
+        samples = 0
+        while time.monotonic() - started < timeout_s:
+            remaining = next_tick - time.monotonic()
+            if remaining > 0.0:
+                time.sleep(remaining)
+            snapshot = transport.feedback_snapshot()
+            q_list = snapshot["joint_position_rad"]
+            feedback_time = snapshot["monotonic"]
+            if q_list is None or feedback_time is None:
+                break
+            q = np.asarray(q_list, dtype=float)
+            if q_previous is not None and feedback_previous is not None:
+                feedback_dt = feedback_time - feedback_previous
+                if 0.002 <= feedback_dt <= 0.1:
+                    qdot = (
+                        0.3 * (q - q_previous) / feedback_dt
+                        + 0.7 * qdot
+                    )
+            q_previous = q.copy()
+            feedback_previous = feedback_time
+            now = time.monotonic()
+            output = controller.decelerate_tick(
+                now, q, qdot, feedback_time, max_deceleration
+            )
+            command_value = np.asarray(output["q_plan"], dtype=float)
+            send_started = time.monotonic()
+            acknowledgement = transport.dashboard.ServoJ(
+                *np.rad2deg(command_value).tolist(),
+                t=robot_settings["servo_t_s"],
+                aheadtime=robot_settings["aheadtime"],
+                gain=robot_settings["gain"],
+            )
+            send_duration = time.monotonic() - send_started
+            state["commands"] += 1
+            state["last_output"] = output
+            if log_handle is not None:
+                row = {
+                    "time": now,
+                    "feedback_time": feedback_time,
+                    "controller_timestamp": snapshot["controller_timestamp"],
+                    "controller_runtime": snapshot["controller_runtime"],
+                    "q_actual": q.tolist(),
+                    "tool_vector_mm_deg": snapshot["tool_vector_mm_deg"],
+                    "command_mode": command_mode,
+                    "command_value": command_value.tolist(),
+                    "servo_ack": str(acknowledgement or ""),
+                    "send_duration_s": send_duration,
+                    "command": state["commands"],
+                    "manual_stop_deceleration": True,
+                    "controller": {
+                        key: json_value(value)
+                        for key, value in output.items()
+                    },
+                }
+                log_handle.write(json.dumps(row, allow_nan=False) + "\n")
+                log_handle.flush()
+            if not servo_ack_success(acknowledgement, allow_empty=True):
+                return {
+                    "performed": True,
+                    "success": False,
+                    "error": f"ServoJ rejected: {acknowledgement}",
+                }
+            samples += 1
+            if (
+                output.get("target_loss_deceleration_complete")
+                and np.linalg.norm(qdot) <= stop_speed
+            ):
+                if settled_since is None:
+                    settled_since = now
+                if now - settled_since >= settle_s:
+                    return {
+                        "performed": True,
+                        "success": True,
+                        "duration_s": now - started,
+                        "samples": samples,
+                        "settle_s": settle_s,
+                        "final_measured_speed_rad_s": float(
+                            np.linalg.norm(qdot)
+                        ),
+                    }
+            else:
+                settled_since = None
+            next_tick += period
+            now = time.monotonic()
+            if next_tick <= now:
+                next_tick += (
+                    int((now - next_tick) / period) + 1
+                ) * period
+        return {
+            "performed": True,
+            "success": False,
+            "error": f"manual stop deceleration exceeded {timeout_s:.3f} s",
+            "samples": samples,
+        }
 
     active_cycle_stop = {"event": None}
+    manual_stop_requested = False
 
     def request_stop():
         stop_event.set()
@@ -480,6 +718,8 @@ def main():
 
     def handle_signal(signum, frame):
         del signum, frame
+        nonlocal manual_stop_requested
+        manual_stop_requested = True
         request_stop()
 
     signal.signal(signal.SIGINT, handle_signal)
@@ -491,6 +731,7 @@ def main():
 
     stats = None
     error = None
+    manual_stop_result = None
     accepted_count = 0
     cycle_records = []
     cycle_index = 0
@@ -531,6 +772,9 @@ def main():
                 state["controller"] = None
                 state["callback_error"] = None
                 state["servo_pose"] = None
+                state["target_loss_decelerating"] = False
+                state["target_loss_deceleration_started_at"] = None
+                state["target_loss_zero_since"] = None
 
         while not stop_event.is_set():
             cycle_index += 1
@@ -610,6 +854,11 @@ def main():
                         timeout_s=float(
                             target_loss_return_settings.get("timeout_s", 20.0)
                         ),
+                        initial_velocity_rad_s=(
+                            state["qdot"]
+                            if "after controlled deceleration" in cycle_fault
+                            else None
+                        ),
                     )
                 except Exception as exc:
                     return_result = {
@@ -636,6 +885,15 @@ def main():
         accepted_count = tracker.accepted_count
         if timer is not None:
             timer.cancel()
+        if manual_stop_requested:
+            try:
+                manual_stop_result = stop_current_motion_gracefully()
+            except Exception as exc:
+                manual_stop_result = {
+                    "performed": True,
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
         try:
             transport.dashboard.Stop()
         except Exception:
@@ -685,6 +943,7 @@ def main():
             "cycles_started": cycle_index,
             "recovery_events": len(cycle_records),
         },
+        "manual_stop": manual_stop_result,
         "observation_log": (
             None if observation_path is None else str(observation_path)
         ),

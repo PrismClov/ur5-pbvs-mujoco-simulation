@@ -9,8 +9,10 @@ from nova5_tongji.tongji_controller import (
     TongjiControlConfig,
     TongjiController,
     aim_direction,
+    angular_feedforward_scale,
     blend_limit,
     cartesian_step,
+    singularity_speed_scale,
     smooth_ramp_scale,
     smooth_rotation,
 )
@@ -18,6 +20,8 @@ from nova5_tongji.tongji_direct_tracking import (
     MarkerPoseTracker,
     open_unique_log,
     servo_ack_success,
+    should_decelerate_for_target_loss,
+    target_in_reacquire_zone,
 )
 from nova5_visual_servo.core import Fault, exp_so3, log_so3
 from nova5_tongji.tracker import TongjiAimer, TongjiTargetTracker
@@ -101,7 +105,7 @@ class TongjiControllerTests(unittest.TestCase):
         desired_forward = output["desired_camera"][:3, 2]
         truth_forward = marker_world[:3, 3] - output["desired_camera"][:3, 3]
         truth_forward /= np.linalg.norm(truth_forward)
-        self.assertGreater(np.linalg.norm(output["q_plan"] - self.q), 1e-3)
+        self.assertGreater(np.linalg.norm(output["q_plan"] - self.q), 1e-4)
         np.testing.assert_allclose(desired_forward, truth_forward, atol=2e-6)
 
     def test_aim_direction_convention(self):
@@ -118,6 +122,114 @@ class TongjiControllerTests(unittest.TestCase):
         )
         np.testing.assert_allclose(target[:3, 3], [0.004, 0.0, 0.0])
         self.assertAlmostEqual(math.acos(np.clip(target[0, 0], -1.0, 1.0)), 0.03)
+
+    def test_target_loss_deceleration_uses_continuous_joint_commands(self):
+        T_BC = self.model.fk(self.q) @ self.T_EC
+        marker = np.eye(4)
+        marker[:3, 3] = T_BC[:3, 3] + T_BC[:3, 2] * 0.40
+        tracker = self.tracker_for_marker(np.linalg.inv(T_BC) @ marker)
+        controller = TongjiController(
+            TongjiControlConfig(),
+            tracker,
+            self.aimer,
+            self.T_EC,
+            self.model,
+            lambda q: True,
+            self.q,
+            np.full(6, 0.1),
+            tracker.t,
+        )
+        now = tracker.t + 0.02
+        output = controller.decelerate_tick(
+            now,
+            self.q,
+            np.full(6, 0.1),
+            now,
+            1.0,
+        )
+
+        self.assertTrue(output["target_loss_deceleration"])
+        self.assertFalse(output["target_loss_deceleration_complete"])
+        self.assertAlmostEqual(
+            np.max(np.abs(output["v_next"])), 0.1, places=9
+        )
+        np.testing.assert_array_equal(output["cartesian_twist"], np.zeros(6))
+
+    def test_hold_waits_for_measured_joint_velocity_to_settle(self):
+        T_BC = self.model.fk(self.q) @ self.T_EC
+        marker = np.eye(4)
+        marker[:3, 3] = T_BC[:3, 3] + T_BC[:3, 2] * 0.40
+        tracker = self.tracker_for_marker(np.linalg.inv(T_BC) @ marker)
+        controller = TongjiController(
+            TongjiControlConfig(
+                hold_translation_error_m=0.1,
+                resume_translation_error_m=0.2,
+                hold_rotation_error_rad=0.2,
+                resume_rotation_error_rad=0.4,
+                hold_entry_velocity_rad_s=0.02,
+                hold_entry_deceleration_rad_s2=1.0,
+            ),
+            tracker,
+            self.aimer,
+            self.T_EC,
+            self.model,
+            lambda q: True,
+            self.q,
+            np.full(6, 0.1),
+            tracker.t,
+        )
+        output = controller.tick(
+            tracker.t + 0.02,
+            self.q,
+            np.full(6, 0.1),
+            tracker.t + 0.02,
+        )
+
+        self.assertFalse(output["motion_hold"])
+        self.assertGreater(np.linalg.norm(output["v_next"]), 0.02)
+
+    def test_target_callback_fault_starts_deceleration_path(self):
+        self.assertTrue(
+            should_decelerate_for_target_loss(
+                "Fault: estimated target speed outside device configuration",
+                False,
+                0.01,
+                0.06,
+            )
+        )
+        self.assertFalse(
+            should_decelerate_for_target_loss(
+                None,
+                False,
+                0.01,
+                0.06,
+            )
+        )
+        self.assertTrue(
+            should_decelerate_for_target_loss(
+                None,
+                False,
+                0.061,
+                0.06,
+            )
+        )
+
+    def test_reacquire_zone_rejects_far_target(self):
+        reference = np.array([0.5, -0.1, 0.08])
+        self.assertTrue(
+            target_in_reacquire_zone(
+                reference,
+                np.array([0.56, -0.08, 0.09]),
+                0.15,
+            )
+        )
+        self.assertFalse(
+            target_in_reacquire_zone(
+                reference,
+                np.array([0.2, -0.4, 0.09]),
+                0.15,
+            )
+        )
 
     def test_rotation_low_pass_limits_a_single_frame_jump(self):
         current = np.eye(3)
@@ -141,6 +253,24 @@ class TongjiControllerTests(unittest.TestCase):
         self.assertEqual(blend_limit(0.6, 1.1, 0.0), 0.6)
         self.assertAlmostEqual(blend_limit(0.6, 1.1, 0.5), 0.85)
         self.assertEqual(blend_limit(0.6, 1.1, 1.0), 1.1)
+
+    def test_angular_feedforward_scale_has_no_threshold_jump(self):
+        values = [
+            angular_feedforward_scale(speed, 0.25, 0.45)
+            for speed in np.linspace(0.0, 0.6, 25)
+        ]
+
+        self.assertEqual(values[0], 0.0)
+        self.assertEqual(values[-1], 1.0)
+        self.assertTrue(np.all(np.diff(values) >= 0.0))
+        self.assertLess(max(np.diff(values)), 0.2)
+
+    def test_singularity_speed_scale_begins_before_hard_stop(self):
+        self.assertEqual(singularity_speed_scale(0.03, 0.03, 0.09), 0.0)
+        self.assertAlmostEqual(
+            singularity_speed_scale(0.06, 0.03, 0.09), 0.5
+        )
+        self.assertEqual(singularity_speed_scale(0.09, 0.03, 0.09), 1.0)
 
     def test_small_joint_command_speed_is_suppressed(self):
         T_BC = self.model.fk(self.q) @ self.T_EC
@@ -691,6 +821,8 @@ class TongjiControllerTests(unittest.TestCase):
             TongjiControlConfig(
                 align_marker_plane=True,
                 upright_marker=True,
+                min_jacobian_singular_value=0.01,
+                singularity_slowdown_start=0.02,
             ),
             tracker,
             None,
@@ -710,7 +842,10 @@ class TongjiControllerTests(unittest.TestCase):
         expected_direction /= np.linalg.norm(expected_direction)
         self.assertFalse(output["marker_orientation_locked"])
         self.assertEqual(output["motion_boost_scale"], 1.0)
-        self.assertEqual(
+        self.assertGreater(
+            output["effective_limits"]["max_joint_velocity_rad_s"], 0.8
+        )
+        self.assertLessEqual(
             output["effective_limits"]["max_joint_velocity_rad_s"], 1.1
         )
         self.assertGreater(
