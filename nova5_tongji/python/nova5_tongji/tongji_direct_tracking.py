@@ -16,6 +16,7 @@ import numpy as np
 
 from nova5_visual_servo.core import Fault
 from nova5_visual_servo.robot import URDFRobot
+from nova5_visual_servo.target_pose_ekf import TargetTracker
 
 from .tongji_controller import (
     TongjiControlConfig,
@@ -31,9 +32,32 @@ DEFAULT_AIMER = ROOT / "nova5_tongji/field_runtime/config/tongji_marker_aimer.ya
 DEFAULT_URDF = ROOT / "nova5_visual_servo/models/nova5_robot.urdf"
 
 
+class MarkerPoseTracker(TargetTracker):
+    """Expose the full-pose ESKF through the direct marker controller interface."""
+
+    accepted_count = 0
+
+    def update(self, *args):
+        accepted = super().update(*args)
+        if accepted:
+            self.accepted_count += 1
+            self.ready = self.accepted_count >= 8
+            if not self.ready:
+                self.reason = "warming up"
+        return accepted
+
+    def predict_state(self, t, max_horizon):
+        state = super().predict_state(t, max_horizon)
+        state["pose"] = state["T"]
+        state["position"] = state["T"][:3, 3]
+        return state
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--ekf", choices=("8d", "12d"), default="8d",
+                        help="Marker estimator (default: 8d; 12d predicts full PnP attitude)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--aimer-config", type=Path, default=DEFAULT_AIMER)
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
@@ -102,9 +126,12 @@ def json_value(value):
 def main():
     args = build_parser().parse_args()
     settings = json.loads(args.config.read_text())
+    if args.ekf == "12d" and not settings["controller"].get("align_marker_plane"):
+        raise ValueError("12d marker tracking requires align_marker_plane")
     if not args.execute:
         print(json.dumps({
             "mode": "dry-run",
+            "ekf": args.ekf,
             "config": str(args.config),
             "aimer_config": str(args.aimer_config),
             "pose_topic": args.pose_topic,
@@ -124,8 +151,12 @@ def main():
     control_hz = args.control_hz or robot_settings["control_hz"]
     control_period = 1.0 / control_hz
     model = URDFRobot(args.urdf)
-    tracker = TongjiTargetTracker(**settings["tracker"])
-    aimer = TongjiAimer(args.aimer_config)
+    if args.ekf == "12d":
+        tracker = MarkerPoseTracker(**settings["tracker"])
+        aimer = None
+    else:
+        tracker = TongjiTargetTracker(**settings["tracker"])
+        aimer = TongjiAimer(args.aimer_config)
 
     transport = DobotInterface(
         dashboardPort=robot_settings["dashboard_port"],
@@ -372,8 +403,9 @@ def main():
         except Exception:
             pass
         transport.disconnect()
-        tracker.close()
-        aimer.close()
+        if aimer is not None:
+            tracker.close()
+            aimer.close()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
@@ -383,7 +415,8 @@ def main():
 
     report = {
         "error": error,
-        "controller": "sp_vision_25_auto_aim_aimer",
+        "controller": "marker_plane_pbvs" if aimer is None else "sp_vision_25_auto_aim_aimer",
+        "ekf": args.ekf,
         "tracker": {
             "ready": tracker.ready,
             "reason": tracker.reason,

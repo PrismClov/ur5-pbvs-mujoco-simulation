@@ -259,6 +259,11 @@ ros2 run ibvs_ur5 nova5_low_speed_executor.py \
 
 ### 同济 Aimer + Nova5 六轴控制器
 
+直连入口默认使用 8 维 EKF。传入 `--ekf 12d` 可切换到已有的完整位姿误差状态 EKF，
+用预测的 PnP 法向与码中心生成定距相机位姿。此模式要求 `align_marker_plane: true`。
+可先运行 `bash nova5_tongji/scripts/run_tongji_controller.sh --ekf 12d` 检查所选模式。
+直连入口按消息到达时的关节反馈转换 PnP 观测，手眼运动时的时间配对精度仍需实测。
+
 该入口位于本目录，复用原版同济 EKF 和 `Aimer`；官方 Dobot Python SDK 只作为
 50 Hz 传输层。启动前必须关闭 `dobot_bringup_v4`，否则 29999/30004 端口会冲突。
 D435i 相机和 `real_tag_tracker.py` 应已运行，并在 `/tag_tracker/pose_camera`

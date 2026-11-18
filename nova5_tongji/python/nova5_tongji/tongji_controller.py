@@ -240,15 +240,25 @@ class TongjiController:
         T_BE_predicted = pose(self.model.fk(q_predicted))
         T_BC_predicted = pose(T_BE_predicted @ self.T_EC)
 
-        aim = self.aimer.aim(
-            self.tracker,
-            execution_time,
-            T_BC_predicted[:3, 3],
-            bullet_speed=c.bullet_speed_m_s,
-        )
-        if aim is None:
-            raise Fault("Tongji Aimer rejected the target")
-        center_direction = aim_direction(aim)
+        aim = None
+        if self.aimer is None:
+            if not c.align_marker_plane:
+                raise Fault("marker-plane tracking requires a plane normal")
+            offset = estimate["position"] - T_BC_predicted[:3, 3]
+            distance = np.linalg.norm(offset)
+            if not np.isfinite(distance) or distance < 1e-6:
+                raise Fault("invalid camera-to-marker distance")
+            center_direction = offset / distance
+        else:
+            aim = self.aimer.aim(
+                self.tracker,
+                execution_time,
+                T_BC_predicted[:3, 3],
+                bullet_speed=c.bullet_speed_m_s,
+            )
+            if aim is None:
+                raise Fault("Tongji Aimer rejected the target")
+            center_direction = aim_direction(aim)
         direction = center_direction
         preferred_x = None
         normal_alignment_error = 0.0
