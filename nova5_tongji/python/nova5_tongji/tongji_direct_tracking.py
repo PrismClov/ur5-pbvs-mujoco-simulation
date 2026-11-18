@@ -35,10 +35,13 @@ DEFAULT_URDF = ROOT / "nova5_visual_servo/models/nova5_robot.urdf"
 class MarkerPoseTracker(TargetTracker):
     """Expose the full-pose ESKF through the direct marker controller interface."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, warmup_updates=8, **kwargs):
         super().__init__(*args, **kwargs)
+        if not isinstance(warmup_updates, int) or warmup_updates < 1:
+            raise ValueError("warmup_updates must be a positive integer")
         self._initial_args = args
         self._initial_kwargs = kwargs
+        self.warmup_updates = warmup_updates
         self.accepted_count = 0
         self.warmup_restarts = 0
 
@@ -55,7 +58,7 @@ class MarkerPoseTracker(TargetTracker):
         accepted = super().update(seq, exposure_time, T_BE_at_exposure, T_EC, T_CQ)
         if accepted:
             self.accepted_count += 1
-            self.ready = self.accepted_count >= 8
+            self.ready = self.accepted_count >= self.warmup_updates
             if not self.ready:
                 self.reason = "warming up"
         return accepted

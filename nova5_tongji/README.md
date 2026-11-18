@@ -352,13 +352,24 @@ bash nova5_tongji/scripts/run_tongji_controller.sh \
 
 该入口等待同济 EKF 收敛后才建立控制器；视觉、反馈、预测、关节、工作空间或跟随
 误差任一失效都会调用 `Stop()`。默认控制周期为 50 Hz、相机到标记目标距离为
-0.40 m、关节速度上限为 0.8 rad/s，并使用实时平滑的 `ServoJ`。参数在
+0.40 m、关节速度上限为 0.6 rad/s、关节加速度上限为 2 rad/s²，并使用实时平滑
+的 `ServoJ`。12D 启动后使用 0.8 s 零斜率 ramp，进入 hold 前先按加速度限制减速。
+当 EKF 检出目标线速度达到 `0.025 m/s` 或角速度达到 `0.12 rad/s` 时，控制器会在
+`0.35 s` 内平滑切换到传送带高速档，Cartesian/关节速度上限提高到
+`0.30 m/s / 1.1 rad/s`，关节加速度上限提高到 `6 rad/s²`；目标停止后自动回到
+静止低速档。每帧日志中的 `motion_boost_scale=0..1` 和 `effective_limits`
+可用于确认当前实际档位。
+参数在
 `nova5_tongji/field_runtime/config/tongji_direct_tracking.json`，Aimer 参数在
 `nova5_tongji/field_runtime/config/tongji_marker_aimer.yaml`。
 
 12D 模式沿用实时追踪的速度上限，并把 ESKF 的角速度用于正对姿态前馈。
 `--observation-log` 每帧记录 PnP 位姿、创新、NIS、关节反馈和接受/拒绝状态；
 该参数要求输出文件尚不存在，因此命令中使用时间戳文件名。
+
+默认 12D 配置不预先区分“纯平移”和“平移+慢转”：ESKF 持续更新完整姿态，
+静止时角速度自然收敛，纯平移时姿态保持不变，缓慢旋转则累积到姿态状态和角速度中。
+`lock_static_target` 与 `lock_marker_orientation` 仅保留为诊断选项，默认均关闭。
 
 `tracker.max_gap` 为 `0.25 s`，只用于启动阶段容忍 ROS 位姿消息偶发延迟并累计
 EKF 收敛样本；控制器运行后仍使用更严格的 `max_visual_age_s=0.15 s`，视觉失效
@@ -396,6 +407,48 @@ bash nova5_tongji/scripts/run_servo.sh --ros-args \
 启动后空闲，不自动清错或使能。沿用 `/predictive_pbvs/start` 和 `/predictive_pbvs/stop`
 服务，保留既有标定、时间戳、状态新鲜度、跟随误差和空间约束检查。
 不要同时运行旧追踪程序或另一个 ServoJ 发布者。
+
+### 固定初始位姿的重复测试
+
+本次抖动验收的初始关节位姿记录在：
+
+```text
+/home/clover/ur_ws/ibvs_rm65/runtime/tongji_pose_baseline_20261118.json
+```
+
+只在当前位姿检查回位目标，不运动：
+
+```bash
+cd /home/clover/Desktop/ur5-pbvs-mujoco-simulation
+.venv/bin/python nova5_tongji/scripts/restore_tongji_pose.py \
+  --baseline /home/clover/ur_ws/ibvs_rm65/runtime/tongji_pose_baseline_20261118.json
+```
+
+以不超过 `0.2 rad/s` 的 ServoJ 运动回到基线，并确认反馈误差小于 `0.5°`：
+
+```bash
+.venv/bin/python nova5_tongji/scripts/restore_tongji_pose.py \
+  --baseline /home/clover/ur_ws/ibvs_rm65/runtime/tongji_pose_baseline_20261118.json \
+  --output /home/clover/ur_ws/ibvs_rm65/runtime/tongji_restore.json \
+  --execute
+```
+
+连续测试时，每轮开始前和结束后都回到同一初始位姿。视觉短暂丢失导致的提前退出
+会自动回位并重试，只把跑满时长的尝试作为有效轮次：
+
+```bash
+bash nova5_tongji/scripts/run_tongji_repeat_trials.sh \
+  --execute \
+  --trials 3 \
+  --duration 10 \
+  --attempts-per-trial 3 \
+  --output-dir /home/clover/ur_ws/ibvs_rm65/runtime/tongji_repeat_fixed_start
+```
+
+2026-11-18 的三轮固定起点验收全部通过：最后 2 秒 `motion_hold=100%`，关节目标
+增量和关节速度均为 0；TCP 位置峰峰值不超过 `0.014 mm`。三次测试后的回位最大
+关节误差均约 `0.00007 rad`。原始日志和汇总见
+`/home/clover/ur_ws/ibvs_rm65/runtime/tongji_repeat_each_from_baseline_final/`。
 
 ## 验证与限制
 

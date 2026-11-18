@@ -9,10 +9,17 @@ from nova5_tongji.tongji_controller import (
     TongjiControlConfig,
     TongjiController,
     aim_direction,
+    blend_limit,
     cartesian_step,
+    smooth_ramp_scale,
+    smooth_rotation,
 )
-from nova5_tongji.tongji_direct_tracking import open_unique_log, servo_ack_success
-from nova5_visual_servo.core import Fault, exp_so3
+from nova5_tongji.tongji_direct_tracking import (
+    MarkerPoseTracker,
+    open_unique_log,
+    servo_ack_success,
+)
+from nova5_visual_servo.core import Fault, exp_so3, log_so3
 from nova5_tongji.tracker import TongjiAimer, TongjiTargetTracker
 from nova5_visual_servo.target_pose_ekf import TargetTracker
 from nova5_visual_servo.robot import URDFRobot
@@ -112,6 +119,29 @@ class TongjiControllerTests(unittest.TestCase):
         np.testing.assert_allclose(target[:3, 3], [0.004, 0.0, 0.0])
         self.assertAlmostEqual(math.acos(np.clip(target[0, 0], -1.0, 1.0)), 0.03)
 
+    def test_rotation_low_pass_limits_a_single_frame_jump(self):
+        current = np.eye(3)
+        target = exp_so3(np.array([0.0, np.deg2rad(10.0), 0.0]))
+        filtered = smooth_rotation(current, target, 0.12)
+        angle = np.linalg.norm(log_so3(filtered @ current.T))
+
+        self.assertAlmostEqual(np.rad2deg(angle), 1.2, places=6)
+        np.testing.assert_allclose(
+            filtered @ filtered.T, np.eye(3), atol=1e-12
+        )
+
+    def test_command_ramp_has_zero_slope_at_start_and_end(self):
+        self.assertEqual(smooth_ramp_scale(10.0, 10.0, 0.6), 0.0)
+        self.assertAlmostEqual(
+            smooth_ramp_scale(10.3, 10.0, 0.6), 0.5, places=12
+        )
+        self.assertEqual(smooth_ramp_scale(10.6, 10.0, 0.6), 1.0)
+
+    def test_moving_target_limits_blend_between_static_and_fast_modes(self):
+        self.assertEqual(blend_limit(0.6, 1.1, 0.0), 0.6)
+        self.assertAlmostEqual(blend_limit(0.6, 1.1, 0.5), 0.85)
+        self.assertEqual(blend_limit(0.6, 1.1, 1.0), 1.1)
+
     def test_small_joint_command_speed_is_suppressed(self):
         T_BC = self.model.fk(self.q) @ self.T_EC
         marker = np.eye(4)
@@ -171,6 +201,7 @@ class TongjiControllerTests(unittest.TestCase):
         )
 
         self.assertTrue(output["motion_hold"])
+        self.assertEqual(output["motion_boost_scale"], 0.0)
         np.testing.assert_array_equal(output["cartesian_twist"], np.zeros(6))
         fixed_target = output["q_plan"].copy()
         noisy_q = self.q.copy()
@@ -199,6 +230,25 @@ class TongjiControllerTests(unittest.TestCase):
         second.close()
         self.assertEqual(first_path, requested)
         self.assertEqual(second_path, directory / "observations.1.jsonl")
+
+    def test_12d_tracker_can_use_four_frame_warmup(self):
+        tracker = MarkerPoseTracker(
+            max_gap=0.25,
+            max_speed=1.0,
+            max_omega=2.0,
+            warmup_updates=4,
+        )
+        for index in range(4):
+            self.assertTrue(
+                tracker.update(
+                    index,
+                    index * 0.03,
+                    np.eye(4),
+                    np.eye(4),
+                    np.eye(4),
+                )
+            )
+        self.assertTrue(tracker.ready)
 
     def test_rejects_near_singular_jacobian(self):
         T_BC = self.model.fk(self.q) @ self.T_EC
@@ -350,7 +400,13 @@ class TongjiControllerTests(unittest.TestCase):
         marker = np.eye(4)
         marker[:3, 3] = [0.0, 0.0, 0.40]
         marker[:3, :3] = np.diag([1.0, -1.0, -1.0])
-        tracker = TargetTracker(max_gap=0.25, max_speed=1.0, max_omega=2.0)
+        tracker = TargetTracker(
+            max_gap=0.25,
+            max_speed=1.0,
+            max_omega=2.0,
+            linear_accel_psd_m2_s3=0.005,
+            angular_accel_psd_rad2_s3=0.02,
+        )
         start = 400.0
         for index in range(12):
             self.assertTrue(
@@ -396,7 +452,10 @@ class TongjiControllerTests(unittest.TestCase):
             np.diag([1.0, -1.0, -1.0])
             @ exp_so3(np.array([0.0, 0.0, np.deg2rad(45.0)]))
         )
-        tracker = TargetTracker(max_gap=0.25, max_speed=1.0, max_omega=2.0)
+        tracker = TargetTracker(
+            max_gap=0.25, max_speed=1.0, max_omega=2.0,
+            innovation_gate=1e9,
+        )
         start = 200.0
         for index in range(12):
             self.assertTrue(
@@ -471,6 +530,172 @@ class TongjiControllerTests(unittest.TestCase):
             q = output["q_plan"].copy()
 
         self.assertTrue(output["static_target_locked"])
+
+    def test_conveyor_orientation_lock_keeps_plane_fixed(self):
+        T_BC = self.model.fk(self.q) @ self.T_EC
+        first_marker = np.eye(4)
+        first_marker[:3, 3] = [0.0, 0.0, 0.40]
+        first_marker[:3, :3] = np.diag([1.0, -1.0, -1.0])
+        tracker = TargetTracker(
+            max_gap=0.25, max_speed=1.0, max_omega=2.0,
+            innovation_gate=1e9,
+        )
+        start = 500.0
+        for index in range(12):
+            self.assertTrue(
+                tracker.update(
+                    index,
+                    start + index * 0.03,
+                    self.model.fk(self.q),
+                    self.T_EC,
+                    first_marker,
+                )
+            )
+        controller = TongjiController(
+            TongjiControlConfig(
+                align_marker_plane=True,
+                upright_marker=True,
+                lock_marker_orientation=True,
+            ),
+            tracker,
+            None,
+            self.T_EC,
+            self.model,
+            lambda q: True,
+            self.q,
+            np.zeros(6),
+            tracker.t,
+        )
+        first = controller.tick(
+            tracker.t + 0.02, self.q, np.zeros(6), tracker.t + 0.02
+        )
+        locked_normal = first["desired_camera"][:3, 2].copy()
+
+        rotated_marker = np.eye(4)
+        rotated_marker[:3, 3] = [0.002, 0.0, 0.40]
+        rotated_marker[:3, :3] = (
+            np.diag([1.0, -1.0, -1.0])
+            @ exp_so3(np.array([0.0, np.deg2rad(2.0), 0.0]))
+        )
+        self.assertTrue(
+            tracker.update(
+                12, tracker.t + 0.03, self.model.fk(self.q),
+                self.T_EC, rotated_marker,
+            )
+        )
+        second = controller.tick(
+            tracker.t + 0.02,
+            first["q_plan"],
+            np.zeros(6),
+            tracker.t + 0.02,
+        )
+
+        self.assertTrue(second["marker_orientation_locked"])
+        np.testing.assert_allclose(
+            second["desired_camera"][:3, 2], locked_normal, atol=1e-10
+        )
+
+    def test_slow_translation_and_rotation_are_both_tracked(self):
+        T_BC = self.model.fk(self.q) @ self.T_EC
+        tracker = TargetTracker(
+            max_gap=0.25,
+            max_speed=1.0,
+            max_omega=2.0,
+            linear_accel_psd_m2_s3=0.005,
+            angular_accel_psd_rad2_s3=0.02,
+        )
+        start = 600.0
+        marker = None
+        for index in range(30):
+            marker = np.eye(4)
+            marker[:3, 3] = [index * 0.002, 0.0, 0.40]
+            marker[:3, :3] = (
+                np.diag([1.0, -1.0, -1.0])
+                @ exp_so3(np.array([0.0, 0.004 * index, 0.0]))
+            )
+            self.assertTrue(
+                tracker.update(
+                    index,
+                    start + index * 0.03,
+                    self.model.fk(self.q),
+                    self.T_EC,
+                    marker,
+                )
+            )
+        controller = TongjiController(
+            TongjiControlConfig(
+                align_marker_plane=True,
+                upright_marker=True,
+            ),
+            tracker,
+            None,
+            self.T_EC,
+            self.model,
+            lambda q: True,
+            self.q,
+            np.zeros(6),
+            tracker.t,
+        )
+        output = controller.tick(
+            tracker.t + 0.02, self.q, np.zeros(6), tracker.t + 0.02
+        )
+
+        marker_normal_world = (T_BC @ marker)[:3, 2]
+        expected_direction = -marker_normal_world
+        expected_direction /= np.linalg.norm(expected_direction)
+        self.assertFalse(output["marker_orientation_locked"])
+        self.assertEqual(output["motion_boost_scale"], 1.0)
+        self.assertEqual(
+            output["effective_limits"]["max_joint_velocity_rad_s"], 1.1
+        )
+        self.assertGreater(
+            np.linalg.norm(output["target_angular_velocity"]), 0.05
+        )
+        self.assertGreater(
+            expected_direction @ output["desired_camera"][:3, 2], 0.99
+        )
+
+    def test_small_angular_velocity_is_not_extrapolated(self):
+        T_BC = self.model.fk(self.q) @ self.T_EC
+        tracker = TargetTracker(max_gap=0.25, max_speed=1.0, max_omega=2.0)
+        start = 700.0
+        marker = np.eye(4)
+        marker[:3, 3] = [0.0, 0.0, 0.40]
+        marker[:3, :3] = np.diag([1.0, -1.0, -1.0])
+        for index in range(20):
+            self.assertTrue(
+                tracker.update(
+                    index,
+                    start + index * 0.03,
+                    self.model.fk(self.q),
+                    self.T_EC,
+                    marker,
+                )
+            )
+        tracker.w = np.array([0.05, 0.0, 0.0])
+        controller = TongjiController(
+            TongjiControlConfig(
+                align_marker_plane=True,
+                upright_marker=True,
+                angular_prediction_deadband_rad_s=0.15,
+            ),
+            tracker,
+            None,
+            self.T_EC,
+            self.model,
+            lambda q: True,
+            self.q,
+            np.zeros(6),
+            tracker.t,
+        )
+        output = controller.tick(
+            tracker.t + 0.02, self.q, np.zeros(6), tracker.t + 0.02
+        )
+
+        self.assertTrue(output["angular_prediction_suppressed"])
+        np.testing.assert_array_equal(
+            output["control_angular_velocity"], np.zeros(3)
+        )
 
 
 if __name__ == "__main__":
