@@ -264,26 +264,94 @@ ros2 run ibvs_ur5 nova5_low_speed_executor.py \
 D435i 相机和 `real_tag_tracker.py` 应已运行，并在 `/tag_tracker/pose_camera`
 发布 ID 0、边长 100 mm 的 ArUco 位姿。
 
-先做不连接机械臂的配置检查：
+#### 完整启动流程
+
+以下命令按三个终端执行。终端中的命令可以整段复制。三个终端都先执行基础环境：
+
+```bash
+cd /home/clover/Desktop/ur5-pbvs-mujoco-simulation
+source /opt/ros/humble/setup.bash
+source /home/clover/ur_ws/install/setup.bash
+```
+
+终端 1，启动 D435i 彩色相机。当前实时追踪使用 `424x240x30` 彩色流：
+
+```bash
+cd /home/clover/Desktop/ur5-pbvs-mujoco-simulation
+source /opt/ros/humble/setup.bash
+source /home/clover/ur_ws/install/setup.bash
+
+ros2 launch realsense2_camera rs_launch.py \
+  camera_namespace:=camera \
+  camera_name:=custom \
+  device_type:=d435i \
+  rgb_camera.color_profile:=424x240x30 \
+  rgb_camera.enable_auto_exposure:=false \
+  enable_depth:=false \
+  enable_sync:=false \
+  align_depth.enable:=false \
+  enable_gyro:=false \
+  enable_accel:=false
+```
+
+终端 2，启动 100 mm、`DICT_4X4_50`、ID 0 的 ArUco tracker：
+
+```bash
+cd /home/clover/Desktop/ur5-pbvs-mujoco-simulation
+source /opt/ros/humble/setup.bash
+source /home/clover/ur_ws/install/setup.bash
+
+ros2 run ibvs_ur5 real_tag_tracker.py \
+  --board-type marker \
+  --dictionary DICT_4X4_50 \
+  --tag-id 0 \
+  --tag-size 0.1 \
+  --base-frame '' \
+  --color-topic /camera/custom/color/image_raw \
+  --camera-info-topic /camera/custom/color/camera_info \
+  --no-enable-depth \
+  --no-publish-debug-image \
+  --async-processing \
+  --no-show \
+  --print-every 1000 \
+  --frame-log /home/clover/ur_ws/ibvs_rm65/runtime/nova5_tracking_frames_single.jsonl
+```
+
+终端 3，先检查视觉话题，再启动实时追踪：
+
+```bash
+cd /home/clover/Desktop/ur5-pbvs-mujoco-simulation
+source /opt/ros/humble/setup.bash
+source /home/clover/ur_ws/install/setup.bash
+
+ros2 topic echo --once /tag_tracker/pose_camera
+
+bash nova5_tongji/scripts/run_tongji_controller.sh \
+  --execute \
+  --duration 60 \
+  --output-log /home/clover/ur_ws/ibvs_rm65/runtime/tongji_servoj_realtime.jsonl
+```
+
+该入口等待同济 EKF 收敛后才建立控制器；视觉、反馈、预测、关节、工作空间或跟随
+误差任一失效都会调用 `Stop()`。默认控制周期为 50 Hz、相机到标记目标距离为
+0.40 m、关节速度上限为 0.8 rad/s，并使用实时平滑的 `ServoJ`。参数在
+`nova5_tongji/field_runtime/config/tongji_direct_tracking.json`，Aimer 参数在
+`nova5_tongji/field_runtime/config/tongji_marker_aimer.yaml`。
+
+只检查配置、不连接机械臂：
 
 ```bash
 bash nova5_tongji/scripts/run_tongji_controller.sh
 ```
 
-确认二维码在工作空间内、机械臂周围无遮挡后，再显式启用运动：
+启动前确认没有 ROS Dobot 驱动占用端口：
 
 ```bash
-bash nova5_tongji/scripts/run_tongji_controller.sh \
-  --execute \
-  --duration 30 \
-  --output-log /home/clover/ur_ws/ibvs_rm65/runtime/tongji_controller.jsonl
+pgrep -af 'dobot_bringup_v4_node|nova5_low_speed_executor.py'
 ```
 
-该入口等待同济 EKF 收敛后才建立控制器；视觉、反馈、预测、关节、工作空间或跟随
-误差任一失效都会调用 `Stop()`。默认控制周期为 50 Hz、相机到标记目标距离为
-0.40 m、关节速度上限为 0.8 rad/s，并使用笛卡尔小步 `ServoP`。参数在
-`nova5_tongji/field_runtime/config/tongji_direct_tracking.json`，Aimer 参数在
-`nova5_tongji/field_runtime/config/tongji_marker_aimer.yaml`。
+正常应没有对应进程。停止时任一终端按 `Ctrl+C`；控制器退出前会调用 `Stop()`，
+独立硬件急停始终保留。
 
 `Aimer` 只提供指向，不负责机械臂跟随速度；因此 200 ms 回正仍必须实机测量，
 不能由编译或离线测试宣称已达到。首次验证应从小偏移开始，并保留独立硬件急停。
