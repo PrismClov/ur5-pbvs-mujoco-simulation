@@ -17,12 +17,21 @@ class FeedbackItem:
     def __init__(self):
         self.robotMode = -1     #
         self.robotCurrentCommandID = 0
+        self.controllerTimestamp = None
+        self.controllerRuntime = None
         self.MessageSize = -1
         self.DigitalInputs =-1
         self.DigitalOutputs = -1
         self.robotCurrentCommandID = -1
+        self.QTarget = None
+        self.QDTarget = None
+        self.QDDTarget = None
         self.QActual = None
+        self.QDActual = None
         self.ToolVectorActual = None
+        self.ToolVectorTarget = None
+        self.TCPSpeedActual = None
+        self.TCPSpeedTarget = None
         self.ActualTCPForce = None
         self.MActual = None
 
@@ -185,11 +194,22 @@ class DobotInterface:
                         # 基础字段
                         self.feedData.MessageSize = feedInfo['len'][0]
                         self.feedData.robotMode = feedInfo['RobotMode'][0]
+                        self.feedData.controllerTimestamp = int(
+                            feedInfo['TimeStamp'][0])
+                        self.feedData.controllerRuntime = int(
+                            feedInfo['RunTime'][0])
                         self.feedData.DigitalInputs = feedInfo['DigitalInputs'][0]
                         self.feedData.DigitalOutputs = feedInfo['DigitalOutputs'][0]
                         self.feedData.robotCurrentCommandID = feedInfo['CurrentCommandId'][0]
+                        self.feedData.QTarget = feedInfo['QTarget'][0]
+                        self.feedData.QDTarget = feedInfo['QDTarget'][0]
+                        self.feedData.QDDTarget = feedInfo['QDDTarget'][0]
                         self.feedData.QActual = feedInfo['QActual'][0]
+                        self.feedData.QDActual = feedInfo['QDActual'][0]
                         self.feedData.ToolVectorActual = feedInfo['ToolVectorActual'][0]
+                        self.feedData.ToolVectorTarget = feedInfo['ToolVectorTarget'][0]
+                        self.feedData.TCPSpeedActual = feedInfo['TCPSpeedActual'][0]
+                        self.feedData.TCPSpeedTarget = feedInfo['TCPSpeedTarget'][0]
                         self.feedData.ActualTCPForce = feedInfo['ActualTCPForce'][0]
                         self.feedData.MActual = feedInfo['MActual'][0]
                         self.feedback_count += 1
@@ -237,17 +257,45 @@ class DobotInterface:
             joint_position_deg = (
                 None if self.feedData.QActual is None
                 else [float(x) for x in self.feedData.QActual])
+            joint_target_deg = (
+                None if self.feedData.QTarget is None
+                else [float(x) for x in self.feedData.QTarget])
             return {
                 "robot_mode": self.feedData.robotMode,
                 "command_id": self.feedData.robotCurrentCommandID,
+                "controller_timestamp": self.feedData.controllerTimestamp,
+                "controller_runtime": self.feedData.controllerRuntime,
                 "joint_position_deg": (
                     None if joint_position_deg is None else joint_position_deg.copy()),
                 "joint_position_rad": (
                     None if joint_position_deg is None
                     else np.deg2rad(joint_position_deg).tolist()),
+                "joint_target_deg": (
+                    None if joint_target_deg is None else joint_target_deg.copy()),
+                "joint_target_rad": (
+                    None if joint_target_deg is None
+                    else np.deg2rad(joint_target_deg).tolist()),
+                "joint_velocity_target_deg_s": (
+                    None if self.feedData.QDTarget is None
+                    else [float(x) for x in self.feedData.QDTarget]),
+                "joint_acceleration_target_deg_s2": (
+                    None if self.feedData.QDDTarget is None
+                    else [float(x) for x in self.feedData.QDDTarget]),
+                "joint_velocity_actual_deg_s": (
+                    None if self.feedData.QDActual is None
+                    else [float(x) for x in self.feedData.QDActual]),
                 "tool_vector_mm_deg": (
                     None if self.feedData.ToolVectorActual is None
                     else [float(x) for x in self.feedData.ToolVectorActual]),
+                "tool_vector_target_mm_deg": (
+                    None if self.feedData.ToolVectorTarget is None
+                    else [float(x) for x in self.feedData.ToolVectorTarget]),
+                "tcp_speed_actual": (
+                    None if self.feedData.TCPSpeedActual is None
+                    else [float(x) for x in self.feedData.TCPSpeedActual]),
+                "tcp_speed_target": (
+                    None if self.feedData.TCPSpeedTarget is None
+                    else [float(x) for x in self.feedData.TCPSpeedTarget]),
                 "monotonic": self.feedback_last_monotonic,
                 "feedback_count": self.feedback_count,
                 "loop_period_s": self.feedback_last_duration_s,

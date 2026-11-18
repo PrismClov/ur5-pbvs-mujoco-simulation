@@ -287,8 +287,21 @@ def main():
             row = {
                 "time": now,
                 "feedback_time": feedback_time,
+                "controller_timestamp": snapshot["controller_timestamp"],
+                "controller_runtime": snapshot["controller_runtime"],
                 "q_actual": q.tolist(),
+                "q_target_native_deg": snapshot["joint_target_deg"],
+                "qd_target_native_deg_s": snapshot[
+                    "joint_velocity_target_deg_s"],
+                "qdd_target_native_deg_s2": snapshot[
+                    "joint_acceleration_target_deg_s2"],
+                "qd_actual_native_deg_s": snapshot[
+                    "joint_velocity_actual_deg_s"],
                 "tool_vector_mm_deg": np.asarray(tool_vector).tolist(),
+                "tool_vector_target_mm_deg": snapshot[
+                    "tool_vector_target_mm_deg"],
+                "tcp_speed_actual": snapshot["tcp_speed_actual"],
+                "tcp_speed_target": snapshot["tcp_speed_target"],
                 "command_mode": command_mode,
                 "command_value": json_value(command_value),
                 "servo_ack": str(acknowledgement or ""),

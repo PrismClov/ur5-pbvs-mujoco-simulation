@@ -338,6 +338,10 @@ bash nova5_tongji/scripts/run_tongji_controller.sh \
 `nova5_tongji/field_runtime/config/tongji_direct_tracking.json`，Aimer 参数在
 `nova5_tongji/field_runtime/config/tongji_marker_aimer.yaml`。
 
+`tracker.max_gap` 为 `0.25 s`，只用于启动阶段容忍 ROS 位姿消息偶发延迟并累计
+EKF 收敛样本；控制器运行后仍使用更严格的 `max_visual_age_s=0.15 s`，视觉失效
+会立即停止。
+
 只检查配置、不连接机械臂：
 
 ```bash
