@@ -115,7 +115,7 @@
   },
   "target_loss_return": {
     "enabled": true,
-    "deceleration_grace_s": 0.06,
+    "deceleration_grace_s": 0.12,
     "deceleration_acceleration_rad_s2": 1.2,
     "deceleration_complete_speed_rad_s": 0.02,
     "post_stop_hold_s": 0.5,

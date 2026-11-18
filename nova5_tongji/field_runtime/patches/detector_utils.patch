@@ -1,8 +1,12 @@
 --- a/src/ibvs_ur5/mujoco/pbvs/detector_utils.py
 +++ b/src/ibvs_ur5/mujoco/pbvs/detector_utils.py
-@@ -16,7 +16,7 @@
+@@ -16,8 +16,10 @@
+     parameters.adaptiveThreshWinSizeMin = 3
      parameters.adaptiveThreshWinSizeMax = 31
-     parameters.adaptiveThreshWinSizeStep = 2
+-    parameters.adaptiveThreshWinSizeStep = 2
++    parameters.adaptiveThreshWinSizeStep = (
++        4 if os.environ.get("NOVA5_UPRIGHT_FAST_DETECT") == "1" else 2
++    )
      parameters.minMarkerPerimeterRate = 0.01
 -    parameters.maxMarkerPerimeterRate = 0.5
 +    parameters.maxMarkerPerimeterRate = 0.9

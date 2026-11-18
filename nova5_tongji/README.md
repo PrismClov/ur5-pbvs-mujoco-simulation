@@ -325,10 +325,9 @@ NOVA5_UPRIGHT_FAST_DETECT=1 ros2 run ibvs_ur5 real_tag_tracker.py \
   --frame-log /home/clover/ur_ws/ibvs_rm65/runtime/nova5_tracking_frames_single.jsonl
 ```
 
-`NOVA5_UPRIGHT_FAST_DETECT=1` 将 adaptive-threshold 扫描步长从 2 提高到 10，
-用于降低 424x240 图像的检测耗时。当前空场景 detector 路径约 3 ms；二维码在画面内
-时的端到端帧率仍需现场复核。如果现场光照变化导致 `marker_not_found` 增加，
-应回退到精细扫描。
+`NOVA5_UPRIGHT_FAST_DETECT=1` 将 adaptive-threshold 扫描步长从 2 提高到 4，
+在检测耗时和弱对比度识别率之间折中。步长 10 会导致标签快速移动或光照变化时
+频繁 `marker_not_found`，不再使用。
 
 终端 3，先检查视觉话题，再启动实时追踪：
 
@@ -390,7 +389,7 @@ EKF 收敛样本；控制器运行后仍使用更严格的 `max_visual_age_s=0.1
 失效时不继续盲发回位命令。
 回位轨迹会匹配故障瞬间的实际关节速度，先零加速度平滑制动，再转向初始位姿，
 避免高速追踪突然停止造成关节冲击声。
-视觉中断超过 `0.06 s` 后，控制器不会立刻停止 ServoJ 流，而会继续以 50 Hz
+视觉中断超过 `0.12 s` 后，控制器不会立刻停止 ServoJ 流，而会继续以 50 Hz
 发送升余弦速度曲线，加速度从零平滑增加到最大 `1.2 rad/s²` 后再回到零，把
 命令速度和实测速度都降到 `0.02 rad/s` 以下，再启动回位；减速最长持续 `4 s`。
 目标估计回调中的速度越界、预测失败等错误也先进入这条减速路径，不会绕过减速
