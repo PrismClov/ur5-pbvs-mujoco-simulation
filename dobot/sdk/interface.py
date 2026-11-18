@@ -2,6 +2,7 @@ import re
 import numpy as np
 import time
 import transforms3d as t3d
+from collections import deque
 
 from .dobot_api import DobotApiFeedBack, DobotApiDashboard
 from .ag95_gripper import AG95GripperDobot
@@ -87,6 +88,7 @@ class DobotInterface:
         self.feedback_last_monotonic: float | None = None
         self.feedback_last_duration_s: float | None = None
         self.feedback_invalid_count = 0
+        self._feedback_history = deque(maxlen=1024)
         self.servo_send_count = 0
         self.servo_send_last_monotonic: float | None = None
         self.servo_send_last_duration_s: float | None = None
@@ -216,6 +218,10 @@ class DobotInterface:
                         self.feedback_last_monotonic = time.monotonic()
                         self.feedback_last_duration_s = (
                             self.feedback_last_monotonic - s0)
+                        self._feedback_history.append((
+                            self.feedback_last_monotonic,
+                            tuple(float(x) for x in self.feedData.QActual),
+                        ))
                     else:
                         self.feedback_invalid_count += 1
             deadline += period
@@ -300,6 +306,34 @@ class DobotInterface:
                 "feedback_count": self.feedback_count,
                 "loop_period_s": self.feedback_last_duration_s,
             }
+
+    def joint_position_at(self, monotonic, max_gap=0.06):
+        """Interpolate joint feedback in radians at a host monotonic timestamp."""
+        monotonic = float(monotonic)
+        if not np.isfinite(monotonic) or max_gap <= 0:
+            raise ValueError("invalid feedback lookup time")
+        with self.value_lock:
+            samples = list(self._feedback_history)
+        if not samples:
+            return None
+        for (before_t, before_q), (after_t, after_q) in zip(
+                samples, samples[1:]):
+            if before_t <= monotonic <= after_t:
+                span = after_t - before_t
+                if span <= 1e-9:
+                    return before_t, np.deg2rad(before_q)
+                alpha = (monotonic - before_t) / span
+                values = (
+                    (1.0 - alpha) * np.asarray(before_q)
+                    + alpha * np.asarray(after_q)
+                )
+                return monotonic, np.deg2rad(values)
+        nearest_t, nearest_q = min(
+            samples, key=lambda sample: abs(sample[0] - monotonic)
+        )
+        if abs(nearest_t - monotonic) <= max_gap:
+            return nearest_t, np.deg2rad(nearest_q)
+        return None
     
     def get_gripper_position(self):
         """Return gripper position (normalized 0--1).

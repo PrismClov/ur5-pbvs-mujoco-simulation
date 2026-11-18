@@ -257,15 +257,18 @@ ros2 run ibvs_ur5 nova5_low_speed_executor.py \
 
 ## 机械臂执行入口
 
-### 同济 Aimer + Nova5 六轴控制器
+### Nova5 实时追踪控制器（12D 全姿态 ESKF / 8D Aimer）
 
-直连入口默认使用 8 维 EKF。传入 `--ekf 12d` 可切换到已有的完整位姿误差状态 EKF，
-用预测的 PnP 法向与码中心生成定距相机位姿。此模式要求 `align_marker_plane: true`。
+直连入口默认使用 12 维完整位姿误差状态 EKF，用预测的 PnP 位置、姿态和角速度生成
+定距正对相机位姿；传入 `--ekf 8d` 可回退到原同济 EKF + Aimer 中心追踪路径。
+12D 模式要求 `align_marker_plane: true`。可用 `--upright` 要求二维码解码 X 轴对齐
+图像右侧，或用 `--no-upright` 只保持正对平面。
 可先运行 `bash nova5_tongji/scripts/run_tongji_controller.sh --ekf 12d` 检查所选模式。
 直连入口按消息到达时的关节反馈转换 PnP 观测，手眼运动时的时间配对精度仍需实测。
 
-该入口位于本目录，复用原版同济 EKF 和 `Aimer`；官方 Dobot Python SDK 只作为
-50 Hz 传输层。启动前必须关闭 `dobot_bringup_v4`，否则 29999/30004 端口会冲突。
+该入口位于本目录；12D 模式直接使用完整姿态 ESKF，8D 兼容模式复用原版同济
+EKF 和 `Aimer`。官方 Dobot Python SDK 只作为 50 Hz 传输层。启动前必须关闭
+`dobot_bringup_v4`，否则 29999/30004 端口会冲突。
 D435i 相机和 `real_tag_tracker.py` 应已运行，并在 `/tag_tracker/pose_camera`
 发布 ID 0、边长 100 mm 的 ArUco 位姿。
 
@@ -306,7 +309,7 @@ cd /home/clover/Desktop/ur5-pbvs-mujoco-simulation
 source /opt/ros/humble/setup.bash
 source /home/clover/ur_ws/install/setup.bash
 
-ros2 run ibvs_ur5 real_tag_tracker.py \
+NOVA5_UPRIGHT_FAST_DETECT=1 ros2 run ibvs_ur5 real_tag_tracker.py \
   --board-type marker \
   --dictionary DICT_4X4_50 \
   --tag-id 0 \
@@ -322,6 +325,11 @@ ros2 run ibvs_ur5 real_tag_tracker.py \
   --frame-log /home/clover/ur_ws/ibvs_rm65/runtime/nova5_tracking_frames_single.jsonl
 ```
 
+`NOVA5_UPRIGHT_FAST_DETECT=1` 将 adaptive-threshold 扫描步长从 2 提高到 10，
+用于降低 424x240 图像的检测耗时。当前空场景 detector 路径约 3 ms；二维码在画面内
+时的端到端帧率仍需现场复核。如果现场光照变化导致 `marker_not_found` 增加，
+应回退到精细扫描。
+
 终端 3，先检查视觉话题，再启动实时追踪：
 
 ```bash
@@ -331,9 +339,14 @@ source /home/clover/ur_ws/install/setup.bash
 
 ros2 topic echo --once /tag_tracker/pose_camera
 
+observation_log="/home/clover/ur_ws/ibvs_rm65/runtime/tongji_12d_observations_$(date +%Y%m%d_%H%M%S).jsonl"
+
 bash nova5_tongji/scripts/run_tongji_controller.sh \
+  --ekf 12d \
+  --upright \
   --execute \
   --duration 60 \
+  --observation-log "$observation_log" \
   --output-log /home/clover/ur_ws/ibvs_rm65/runtime/tongji_servoj_realtime.jsonl
 ```
 
@@ -342,6 +355,10 @@ bash nova5_tongji/scripts/run_tongji_controller.sh \
 0.40 m、关节速度上限为 0.8 rad/s，并使用实时平滑的 `ServoJ`。参数在
 `nova5_tongji/field_runtime/config/tongji_direct_tracking.json`，Aimer 参数在
 `nova5_tongji/field_runtime/config/tongji_marker_aimer.yaml`。
+
+12D 模式沿用实时追踪的速度上限，并把 ESKF 的角速度用于正对姿态前馈。
+`--observation-log` 每帧记录 PnP 位姿、创新、NIS、关节反馈和接受/拒绝状态；
+该参数要求输出文件尚不存在，因此命令中使用时间戳文件名。
 
 `tracker.max_gap` 为 `0.25 s`，只用于启动阶段容忍 ROS 位姿消息偶发延迟并累计
 EKF 收敛样本；控制器运行后仍使用更严格的 `max_visual_age_s=0.15 s`，视觉失效

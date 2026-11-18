@@ -6,4 +6,6 @@ python="$root/.venv/bin/python"
 if [[ ! -x "$python" ]]; then
   python=python3
 fi
+# Small servo matrices share the VM with the camera and feedback threads.
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 exec "$python" -m nova5_tongji.tongji_direct_tracking "$@"

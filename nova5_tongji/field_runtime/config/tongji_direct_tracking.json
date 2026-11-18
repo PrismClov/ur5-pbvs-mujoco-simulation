@@ -5,6 +5,7 @@
     [0.029153879048633813, 0.04074468548260599, 0.9987441724192144, 0.027551521985729892],
     [0.0, 0.0, 0.0, 1.0]
   ],
+  "image_feedback_offset_s": 0.04,
   "workspace_min": [-1.0, -1.0, -1.0],
   "workspace_max": [1.0, 1.0, 1.0],
   "tracker": {
@@ -15,6 +16,11 @@
     "orientation_std_rad": 0.00872664626,
     "linear_accel_psd_m2_s3": 0.02,
     "angular_accel_psd_rad2_s3": 0.2
+  },
+  "tracker_12d": {
+    "orientation_residual_gate_rad": 0.0873,
+    "position_only_gate": 16.27,
+    "max_position_only_updates": 30
   },
   "controller": {
     "standoff_m": 0.4,
@@ -36,6 +42,7 @@
     "align_marker_roll": false,
     "normal_smoothing_alpha": 0.25,
     "min_jacobian_singular_value": 0.03,
+    "joint_limit_margin_rad": 0.08,
     "twist_smoothing_alpha": 0.2,
     "min_joint_command_speed_rad_s": 0.01,
     "reversal_deadband_rad_s": 0.04,
@@ -47,6 +54,26 @@
     "command_feedback_gain": 0.1,
     "dt_min_s": 0.01,
     "dt_max_s": 0.04
+  },
+  "controller_12d": {
+    "kp_linear": 10.0,
+    "kp_angular": 10.0,
+    "max_cart_linear_m_s": 0.2,
+    "max_cart_angular_rad_s": 1.5,
+    "max_joint_velocity_rad_s": 0.8,
+    "max_joint_acceleration_rad_s2": 5.0,
+    "max_joint_step_rad": 0.035,
+    "min_joint_command_speed_rad_s": 0.01,
+    "joint_limit_margin_rad": 0.08,
+    "max_visual_age_s": 0.25,
+    "max_prediction_s": 0.4,
+    "linear_feedforward_gain": 0.35,
+    "angular_feedforward_gain": 0.1,
+    "lock_static_target": true,
+    "static_target_linear_speed_m_s": 0.05,
+    "static_target_angular_speed_rad_s": 0.3,
+    "static_target_hold_s": 0.3,
+    "upright_marker": true
   },
   "robot": {
     "ip": "192.168.5.2",

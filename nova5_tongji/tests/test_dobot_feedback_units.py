@@ -1,5 +1,6 @@
 import threading
 import unittest
+from collections import deque
 
 import numpy as np
 
@@ -46,6 +47,20 @@ class DobotFeedbackUnitsTests(unittest.TestCase):
         self.assertIsNot(
             snapshot["joint_position_deg"], robot.feedData.QActual
         )
+
+    def test_joint_position_at_interpolates_image_exposure_time(self):
+        robot = object.__new__(DobotInterface)
+        robot.value_lock = threading.Lock()
+        robot._feedback_history = deque([
+            (1.0, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+            (2.0, (90.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        ])
+
+        timestamp, joints = robot.joint_position_at(1.5)
+
+        self.assertEqual(timestamp, 1.5)
+        self.assertAlmostEqual(joints[0], np.pi / 4.0)
+        self.assertIsNone(robot.joint_position_at(3.0, max_gap=0.2))
 
 
 if __name__ == "__main__":

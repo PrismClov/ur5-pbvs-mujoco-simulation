@@ -36,6 +36,26 @@ class RealtimeLoopTests(unittest.TestCase):
         self.assertEqual(stats.ticks, 2)
         self.assertGreaterEqual(stats.deadlines_missed, 1)
 
+    def test_pace_from_start_does_not_burst_after_overrun(self):
+        stop = threading.Event()
+        timestamps = []
+
+        def step():
+            timestamps.append(time.monotonic())
+            time.sleep(0.045)
+            if len(timestamps) >= 3:
+                stop.set()
+
+        stats = run_control_loop(
+            step, stop, control_hz=50.0, pace_from_start=True
+        )
+        self.assertEqual(stats.ticks, 3)
+        intervals = [
+            b - a for a, b in zip(timestamps, timestamps[1:])
+        ]
+        self.assertGreaterEqual(min(intervals), 0.040)
+        self.assertGreaterEqual(stats.deadlines_missed, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

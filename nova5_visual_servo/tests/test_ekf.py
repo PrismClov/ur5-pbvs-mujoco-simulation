@@ -75,3 +75,35 @@ class ESKFTests(unittest.TestCase):
         np.testing.assert_allclose(tr.v, [.1, 0, 0], atol=.002)
         np.testing.assert_allclose(tr.w, [0, 0, .2], atol=.002)
         self.assertGreaterEqual(np.linalg.eigvalsh(tr.P).min(), -1e-12)
+
+    def test_orientation_branch_outlier_keeps_position_update(self):
+        tr = TargetTracker(
+            .25,
+            3.,
+            3.,
+            orientation_residual_gate_rad=np.deg2rad(5.0),
+            position_only_gate=16.27,
+            max_position_only_updates=3,
+        )
+        for index in range(4):
+            self.assertTrue(
+                tr.update(
+                    index,
+                    index * .03,
+                    np.eye(4),
+                    np.eye(4),
+                    np.eye(4),
+                )
+            )
+
+        flipped = np.eye(4)
+        flipped[:3, :3] = exp_so3(np.array([0.0, np.deg2rad(12.0), 0.0]))
+        flipped[0, 3] = .002
+        self.assertTrue(tr.update(4, .12, np.eye(4), np.eye(4), flipped))
+        self.assertEqual(tr.update_mode, "position_only")
+        self.assertGreater(tr.T[0, 3], .001)
+        self.assertLess(np.linalg.norm(log_so3(tr.T[:3, :3])), 1e-6)
+        np.testing.assert_array_equal(tr.w, np.zeros(3))
+
+        self.assertTrue(tr.update(5, .15, np.eye(4), np.eye(4), np.eye(4)))
+        self.assertEqual(tr.update_mode, "full")

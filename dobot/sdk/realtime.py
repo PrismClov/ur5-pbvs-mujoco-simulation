@@ -38,6 +38,8 @@ def run_control_loop(
     control_step: Callable[[], None],
     stop_event: threading.Event,
     control_hz: float = 50.0,
+    *,
+    pace_from_start: bool = False,
 ) -> LoopStats:
     """Run ``control_step`` at a fixed rate without catch-up bursts.
 
@@ -64,6 +66,18 @@ def run_control_loop(
         ticks += 1
         deadline += period
         now = time.monotonic()
+        if pace_from_start:
+            # Anchor fast ticks to their start, but if a step overruns, discard
+            # the missed slot and start a new period after the step completes.
+            target_deadline = step_started + period
+            if step_finished > target_deadline:
+                lateness = step_finished - target_deadline
+                missed += int(lateness / period) + 1
+                max_lateness = max(max_lateness, lateness)
+                deadline = step_finished
+            else:
+                deadline = target_deadline
+            continue
         if deadline <= now:
             lateness = now - deadline
             max_lateness = max(max_lateness, lateness)

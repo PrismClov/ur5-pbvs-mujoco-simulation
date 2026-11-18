@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Track a 100 mm marker with Nova5 using the upstream Tongji Aimer."""
+"""Real-time Nova5 marker tracking with full-pose or Tongji Aimer estimation."""
 
 from __future__ import annotations
 
@@ -35,10 +35,24 @@ DEFAULT_URDF = ROOT / "nova5_visual_servo/models/nova5_robot.urdf"
 class MarkerPoseTracker(TargetTracker):
     """Expose the full-pose ESKF through the direct marker controller interface."""
 
-    accepted_count = 0
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._initial_args = args
+        self._initial_kwargs = kwargs
+        self.accepted_count = 0
+        self.warmup_restarts = 0
 
-    def update(self, *args):
-        accepted = super().update(*args)
+    def update(self, seq, exposure_time, T_BE_at_exposure, T_EC, T_CQ):
+        # Before ServoJ starts, discard a stale partial initialization. Once
+        # ready, the base estimator must fault on the same observation gap.
+        if (not self.ready and self.t is not None
+                and seq > self.seq and np.isfinite(exposure_time)
+                and exposure_time > self.last_seen_time
+                and exposure_time - self.t > self.max_gap):
+            super().__init__(*self._initial_args, **self._initial_kwargs)
+            self.accepted_count = 0
+            self.warmup_restarts += 1
+        accepted = super().update(seq, exposure_time, T_BE_at_exposure, T_EC, T_CQ)
         if accepted:
             self.accepted_count += 1
             self.ready = self.accepted_count >= 8
@@ -55,14 +69,20 @@ class MarkerPoseTracker(TargetTracker):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--upright", action=argparse.BooleanOptionalAction, default=None, help="Align decoded marker +X with image right at configured standoff")
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--ekf", choices=("8d", "12d"), default="8d",
-                        help="Marker estimator (default: 8d; 12d predicts full PnP attitude)")
+    parser.add_argument(
+        "--ekf",
+        choices=("8d", "12d"),
+        default="12d",
+        help="Marker estimator (default: 12d full-pose ESKF)",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--aimer-config", type=Path, default=DEFAULT_AIMER)
     parser.add_argument("--urdf", type=Path, default=DEFAULT_URDF)
     parser.add_argument("--pose-topic", default="/tag_tracker/pose_camera")
     parser.add_argument("--duration", type=float, default=0.0)
+    parser.add_argument("--observation-log", type=Path, help="Per-frame PnP, feedback and innovation JSONL")
     parser.add_argument("--output-log", type=Path)
     parser.add_argument("--ip")
     parser.add_argument("--control-hz", type=float)
@@ -123,11 +143,31 @@ def json_value(value):
     return value
 
 
+def open_unique_log(path):
+    """Open a new JSONL log without overwriting or failing on an existing name."""
+    path = Path(path)
+    for index in range(10000):
+        suffix = "" if index == 0 else f".{index}"
+        candidate = path.with_name(path.stem + suffix + path.suffix)
+        try:
+            return candidate, candidate.open("x", encoding="utf-8")
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"could not allocate a unique log name for {path}")
+
+
 def main():
     args = build_parser().parse_args()
     settings = json.loads(args.config.read_text())
-    if args.ekf == "12d" and not settings["controller"].get("align_marker_plane"):
-        raise ValueError("12d marker tracking requires align_marker_plane")
+    controller = settings["controller"]
+    if args.ekf == "12d":
+        controller.update(settings.get("controller_12d", {}))
+        if not controller.get("align_marker_plane"):
+            raise ValueError("12d marker tracking requires align_marker_plane")
+    if args.upright is not None:
+        controller["upright_marker"] = args.upright
+    if controller.get("upright_marker") and args.ekf != "12d":
+        raise ValueError("upright tracking requires --ekf 12d")
     if not args.execute:
         print(json.dumps({
             "mode": "dry-run",
@@ -148,16 +188,28 @@ def main():
 
     robot_settings = settings["robot"]
     control_settings = TongjiControlConfig(**settings["controller"])
+    image_feedback_offset_s = float(
+        settings.get("image_feedback_offset_s", 0.0)
+    )
+    if not 0.0 <= image_feedback_offset_s <= 0.15:
+        raise ValueError("image_feedback_offset_s must be in [0, 0.15]")
     control_hz = args.control_hz or robot_settings["control_hz"]
     control_period = 1.0 / control_hz
     model = URDFRobot(args.urdf)
     if args.ekf == "12d":
-        tracker = MarkerPoseTracker(**settings["tracker"])
+        tracker = MarkerPoseTracker(**{
+            **settings["tracker"],
+            **settings.get("tracker_12d", {}),
+        })
         aimer = None
     else:
         tracker = TongjiTargetTracker(**settings["tracker"])
         aimer = TongjiAimer(args.aimer_config)
 
+    observation_path = None
+    observations = None
+    if args.observation_log is not None:
+        observation_path, observations = open_unique_log(args.observation_log)
     transport = DobotInterface(
         dashboardPort=robot_settings["dashboard_port"],
         feedPortFour=robot_settings["feedback_port"],
@@ -196,19 +248,49 @@ def main():
             return
         try:
             snapshot = transport.feedback_snapshot()
-            q = snapshot["joint_position_rad"]
-            if q is None or len(q) != 6:
+            latest_q = snapshot["joint_position_rad"]
+            if latest_q is None or len(latest_q) != 6:
                 return
-            q = np.asarray(q, dtype=float)
             with lock:
                 state["sequence"] += 1
-                tracker.update(
-                    state["sequence"],
-                    time.monotonic(),
-                    model.fk(q),
-                    np.asarray(settings["T_EC"], dtype=float),
-                    pose_from_message(message),
-                )
+                received = time.monotonic()
+                wall = time.time()
+                image_time = message.header.stamp.sec + message.header.stamp.nanosec * 1e-9
+                capture_monotonic = received - max(0.0, wall - image_time)
+                feedback_lookup_time = capture_monotonic + image_feedback_offset_s
+                sample = transport.joint_position_at(feedback_lookup_time)
+                if sample is None:
+                    if observations is not None:
+                        observations.write(json.dumps({
+                            "seq": state["sequence"],
+                            "received": received,
+                            "wall": wall,
+                            "image_time": image_time,
+                            "capture_monotonic": capture_monotonic,
+                            "feedback_lookup_time": feedback_lookup_time,
+                            "accepted": False,
+                            "reason": "joint feedback not available at image time",
+                        }, allow_nan=False) + "\n")
+                    return
+                feedback_sample_time, q_at_capture = sample
+                marker = pose_from_message(message)
+                accepted = tracker.update(state["sequence"], capture_monotonic,
+                                          model.fk(q_at_capture),
+                                          np.asarray(settings["T_EC"], dtype=float), marker)
+                if accepted:
+                    tracker.received_time = received
+                if observations is not None:
+                    residual = getattr(tracker, "innovation", None)
+                    row = dict(seq=state["sequence"], received=received, wall=wall,
+                               image_time=image_time, capture_monotonic=capture_monotonic,
+                               feedback_lookup_time=feedback_lookup_time,
+                               T_CQ=marker.tolist(), q=q_at_capture.tolist(),
+                               feedback_time=feedback_sample_time, accepted=bool(accepted),
+                               residual=None if residual is None else residual.tolist(),
+                               nis=tracker.nis, reason=tracker.reason,
+                               update_mode=getattr(tracker, "update_mode", None),
+                               rejections=tracker.rejections)
+                    observations.write(json.dumps(row, allow_nan=False) + "\n")
         except Exception as exc:
             state["callback_error"] = f"{type(exc).__name__}: {exc}"
             stop_event.set()
@@ -384,12 +466,15 @@ def main():
                     f"no usable target on {args.pose_topic}: {tracker.reason}"
                 )
             time.sleep(0.05)
+        if state["callback_error"] is not None:
+            raise RuntimeError(state["callback_error"])
         if not tracker.ready:
             raise RuntimeError(f"no usable target: {tracker.reason}")
         stats = run_control_loop(
             control_step,
             stop_event,
             control_hz=control_hz,
+            pace_from_start=True,
         )
     except (Exception, Fault) as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -410,11 +495,14 @@ def main():
         if rclpy.ok():
             rclpy.shutdown()
         ros_thread.join(timeout=2.0)
+        if observations is not None:
+            observations.close()
         if log_handle is not None:
             log_handle.close()
 
     report = {
         "error": error,
+        "callback_error": state["callback_error"],
         "controller": "marker_plane_pbvs" if aimer is None else "sp_vision_25_auto_aim_aimer",
         "ekf": args.ekf,
         "tracker": {
@@ -422,10 +510,14 @@ def main():
             "reason": tracker.reason,
             "rejections": tracker.rejections,
             "accepted_count": accepted_count,
+            "warmup_restarts": getattr(tracker, "warmup_restarts", 0),
         },
         "control_loop": None if stats is None else asdict(stats),
         "command_mode": command_mode,
         "commands": state["commands"],
+        "observation_log": (
+            None if observation_path is None else str(observation_path)
+        ),
         "last_controller_output": (
             None if state["last_output"] is None
             else {key: json_value(value)

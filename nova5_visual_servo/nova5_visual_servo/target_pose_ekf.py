@@ -5,6 +5,8 @@ No SciPy dependency. Angular Q is integrated using 8-point Gauss quadrature.
 """
 import numpy as np
 
+_QUADRATURE = np.polynomial.legendre.leggauss(8)
+
 
 def left_jacobian(phi):
     from .core import skew
@@ -29,7 +31,7 @@ def process_noise(w, dt, linear_psd, angular_psd):
     Q[:3, :3] = np.eye(3)*linear_psd*dt**3/3
     Q[:3, 3:6] = Q[3:6, :3] = np.eye(3)*linear_psd*dt**2/2
     Q[3:6, 3:6] = np.eye(3)*linear_psd*dt
-    nodes, weights = np.polynomial.legendre.leggauss(8)
+    nodes, weights = _QUADRATURE
     for x, weight in zip(nodes, weights):
         s = (x+1)*dt/2
         G = np.vstack((left_jacobian(w*s)*s, np.eye(3)))
@@ -43,7 +45,10 @@ class TargetTracker:
                  linear_accel_psd_m2_s3=.02, angular_accel_psd_rad2_s3=.20,
                  initial_velocity_std=.5, initial_omega_std=1.,
                  innovation_gate=22.46, max_rejections=3,
-                 max_position_sigma=.05, max_orientation_sigma=.2):
+                 max_position_sigma=.05, max_orientation_sigma=.2,
+                 orientation_residual_gate_rad=None,
+                 position_only_gate=16.27,
+                 max_position_only_updates=30):
         values = [max_gap, max_speed, max_omega, position_std_m, orientation_std_rad,
                   linear_accel_psd_m2_s3, angular_accel_psd_rad2_s3,
                   initial_velocity_std, initial_omega_std, innovation_gate,
@@ -57,12 +62,26 @@ class TargetTracker:
                          [orientation_std_rad**2]*3+[initial_omega_std**2]*3)
         self.gate, self.max_rejections = innovation_gate, max_rejections
         self.max_position_sigma, self.max_orientation_sigma = max_position_sigma, max_orientation_sigma
+        if orientation_residual_gate_rad is not None and (
+                not np.isfinite(orientation_residual_gate_rad)
+                or orientation_residual_gate_rad <= 0):
+            raise ValueError('invalid orientation residual gate')
+        if not np.isfinite(position_only_gate) or position_only_gate <= 0:
+            raise ValueError('invalid position-only innovation gate')
+        if not isinstance(max_position_only_updates, int) or max_position_only_updates < 1:
+            raise ValueError('invalid position-only update limit')
+        self.orientation_residual_gate = orientation_residual_gate_rad
+        self.position_only_gate = position_only_gate
+        self.max_position_only_updates = max_position_only_updates
+        self.position_only_updates = 0
         self.t, self.seq, self.last_seen_time = None, -1, -np.inf
         self.v, self.w = np.zeros(3), np.zeros(3)
         self.T = np.eye(4)
         self.ready = False
         self.rejections = 0
+        self.innovation = None
         self.nis = None
+        self.update_mode = 'initialized'
         self.reason = 'uninitialized'
 
     def _propagate(self, dt):
@@ -92,9 +111,40 @@ class TargetTracker:
         residual = np.r_[Z[:3, 3]-T[:3, 3], log_so3(Z[:3, :3]@T[:3, :3].T)]
         H = np.zeros((6, 12)); H[:3, :3] = np.eye(3); H[3:, 6:9] = np.eye(3)
         S = H@P@H.T+self.Rm
+        self.innovation = residual.copy()
         self.nis = float(residual@np.linalg.solve(S, residual))
         if self.nis > self.gate:
+            orientation_outlier = (
+                self.orientation_residual_gate is not None
+                and np.linalg.norm(residual[3:]) > self.orientation_residual_gate
+            )
+            if orientation_outlier:
+                Hp, Rp, zp = H[:3], self.Rm[:3, :3], residual[:3]
+                Sp = Hp@P@Hp.T+Rp
+                nis_position = float(zp@np.linalg.solve(Sp, zp))
+                if nis_position <= self.position_only_gate:
+                    if self.position_only_updates >= self.max_position_only_updates:
+                        self.rejections += 1
+                        self.reason = 'orientation outlier persisted'
+                        return False
+                    Kp = np.linalg.solve(Sp, Hp@P).T
+                    dx = Kp@zp
+                    v = self.v+dx[3:6]
+                    if np.linalg.norm(v) > self.max_speed:
+                        raise Fault('estimated target speed outside device configuration')
+                    T[:3, 3] += dx[:3]
+                    A = np.eye(12)-Kp@Hp
+                    P = A@P@A.T+Kp@Rp@Kp.T
+                    self.T, self.P = T, (P+P.T)/2
+                    self.v, self.w, self.t = v, np.zeros(3), exposure_time
+                    self.position_only_updates += 1
+                    self.nis = nis_position
+                    self.ready, self.rejections = True, 0
+                    self.update_mode = 'position_only'
+                    self.reason = 'orientation outlier; position-only update'
+                    return True
             self.rejections += 1
+            self.update_mode = 'rejected'
             self.reason = 'innovation rejected'
             return False  # accepted timestamp/state/covariance remain unchanged
         K = np.linalg.solve(S, H@P).T
@@ -110,6 +160,8 @@ class TargetTracker:
         P = G@P@G.T  # reset left attitude error after injection
         self.T, self.P = T, (P+P.T)/2
         self.v, self.w, self.t = v, w, exposure_time
+        self.position_only_updates = 0
+        self.update_mode = 'full'
         self.ready, self.rejections, self.reason = True, 0, 'ok'
         return True
 

@@ -37,23 +37,29 @@ class URDFRobot:
         if len(self.names) != 6:
             raise ValueError('expected six joints')
 
-    def evaluate(self, q):
+    def _chain_pose(self, q, with_axes):
         q = vector(q, 6)
         T, axes, origins, index = np.eye(4), [], [], 0
         for origin, axis, active in self.chain:
             T = T@origin
             if active:
-                axes.append(T[:3, :3]@axis)
-                origins.append(T[:3, 3].copy())
+                if with_axes:
+                    axes.append(T[:3, :3]@axis)
+                    origins.append(T[:3, 3].copy())
                 R = np.eye(4)
                 R[:3, :3] = exp_so3(axis*q[index])
                 T = T@R
                 index += 1
-        J = np.column_stack([np.r_[np.cross(a, T[:3, 3]-p), a] for a, p in zip(axes, origins)])
+        return T, axes, origins
+
+    def evaluate(self, q):
+        T, axes, origins = self._chain_pose(q, True)
+        linear = np.cross(axes, T[:3, 3] - np.asarray(origins))
+        J = np.vstack((linear.T, np.asarray(axes).T))
         return T, J
 
     def fk(self, q):
-        return self.evaluate(q)[0]
+        return self._chain_pose(q, False)[0]
 
     def jac(self, q):
         return self.evaluate(q)[1]

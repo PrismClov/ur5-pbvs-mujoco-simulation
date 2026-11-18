@@ -31,8 +31,10 @@ class TongjiControlConfig:
     bullet_speed_m_s: float = 1000.0
     align_marker_plane: bool = False
     align_marker_roll: bool = False
+    upright_marker: bool = False
     normal_smoothing_alpha: float = 0.25
     min_jacobian_singular_value: float = 0.03
+    joint_limit_margin_rad: float = 0.08
     twist_smoothing_alpha: float = 0.20
     min_joint_command_speed_rad_s: float = 0.01
     reversal_deadband_rad_s: float = 0.04
@@ -42,6 +44,12 @@ class TongjiControlConfig:
     hold_rotation_error_rad: float = 0.005
     resume_rotation_error_rad: float = 0.010
     command_feedback_gain: float = 0.10
+    linear_feedforward_gain: float = 1.0
+    angular_feedforward_gain: float = 1.0
+    lock_static_target: bool = False
+    static_target_linear_speed_m_s: float = 0.05
+    static_target_angular_speed_rad_s: float = 0.30
+    static_target_hold_s: float = 0.30
     dt_min_s: float = 0.010
     dt_max_s: float = 0.040
 
@@ -86,6 +94,18 @@ class TongjiControlConfig:
             raise ValueError("invalid target hold hysteresis")
         if not 0.0 < self.command_feedback_gain <= 1.0:
             raise ValueError("command feedback gain must be in (0, 1]")
+        if not 0.0 <= self.linear_feedforward_gain <= 1.0:
+            raise ValueError("linear feedforward gain must be in [0, 1]")
+        if not 0.0 <= self.angular_feedforward_gain <= 1.0:
+            raise ValueError("angular feedforward gain must be in [0, 1]")
+        if (
+            self.static_target_linear_speed_m_s <= 0.0
+            or self.static_target_angular_speed_rad_s <= 0.0
+            or self.static_target_hold_s <= 0.0
+        ):
+            raise ValueError("invalid static target lock configuration")
+        if self.joint_limit_margin_rad < 0.0:
+            raise ValueError("joint limit margin must be nonnegative")
 
 
 def aim_direction(aim):
@@ -185,6 +205,8 @@ class TongjiController:
         self.motion_hold = False
         self.q_hold_target = None
         self.filtered_marker_normal = None
+        self.static_target_pose = None
+        self.static_target_since = None
         self.last_time = float(start_time)
         self.joint_lower = np.asarray(
             model.lower if joint_lower is None else joint_lower, dtype=float
@@ -200,6 +222,7 @@ class TongjiController:
         ):
             raise ValueError("invalid initial joint state")
         self._check_jacobian_condition(self.q_plan)
+        self._check_joint_and_workspace(self.q_plan)
         self.faulted = False
 
     def tick(self, now, q_actual, qd_actual, feedback_sample_time):
@@ -218,10 +241,11 @@ class TongjiController:
         self._check_jacobian_condition(q)
         dt = float(now) - self.last_time
         if not c.dt_min_s <= dt <= c.dt_max_s:
-            raise Fault("control period outside bounds; no catch-up")
+            raise Fault(f"control period {dt*1000:.3f} ms outside bounds; no catch-up")
         if not 0.0 <= now - feedback_sample_time <= c.max_feedback_age_s:
             raise Fault("stale joint feedback")
-        if self.tracker.t is None or not 0.0 <= now - self.tracker.t <= c.max_visual_age_s:
+        receive_time = getattr(self.tracker, "received_time", self.tracker.t)
+        if self.tracker.t is None or not 0.0 <= now - receive_time <= c.max_visual_age_s:
             raise Fault("stale vision")
         if np.any(abs(self.q_plan - q) > c.max_follow_error_rad):
             raise Fault("command-feedback divergence")
@@ -232,6 +256,38 @@ class TongjiController:
         estimate = self.tracker.predict_state(execution_time, c.max_prediction_s)
         if not estimate["usable"]:
             raise Fault("Tongji target estimate is not usable")
+        estimate_pose = pose(
+            estimate.get("pose", estimate.get("T"))
+        )
+        estimate_position = np.asarray(
+            estimate.get("position", estimate_pose[:3, 3]),
+            dtype=float,
+        )
+        estimate_velocity = np.asarray(
+            estimate.get("velocity", np.zeros(3)), dtype=float
+        )
+        estimate_angular_velocity = np.asarray(
+            estimate.get("angular_velocity", np.zeros(3)), dtype=float
+        )
+        if c.lock_static_target:
+            static_now = (
+                np.linalg.norm(estimate_velocity)
+                < c.static_target_linear_speed_m_s
+                and np.linalg.norm(estimate_angular_velocity)
+                < c.static_target_angular_speed_rad_s
+            )
+            if static_now:
+                if self.static_target_since is None:
+                    self.static_target_since = now
+                    self.static_target_pose = estimate_pose.copy()
+                if now - self.static_target_since >= c.static_target_hold_s:
+                    estimate_pose = self.static_target_pose.copy()
+                    estimate_position = estimate_pose[:3, 3].copy()
+                    estimate_velocity = np.zeros(3)
+                    estimate_angular_velocity = np.zeros(3)
+            else:
+                self.static_target_since = None
+                self.static_target_pose = None
 
         robot_horizon = execution_time - feedback_sample_time
         if not 0.0 <= robot_horizon <= c.max_prediction_s:
@@ -244,7 +300,7 @@ class TongjiController:
         if self.aimer is None:
             if not c.align_marker_plane:
                 raise Fault("marker-plane tracking requires a plane normal")
-            offset = estimate["position"] - T_BC_predicted[:3, 3]
+            offset = estimate_position - T_BC_predicted[:3, 3]
             distance = np.linalg.norm(offset)
             if not np.isfinite(distance) or distance < 1e-6:
                 raise Fault("invalid camera-to-marker distance")
@@ -264,9 +320,9 @@ class TongjiController:
         normal_alignment_error = 0.0
         marker_normal = None
         if c.align_marker_plane:
-            marker_rotation = pose(estimate["pose"])[:3, :3]
+            marker_rotation = estimate_pose[:3, :3]
             raw_normal = marker_rotation[:, 2].copy()
-            to_camera = T_BC_predicted[:3, 3] - estimate["position"]
+            to_camera = T_BC_predicted[:3, 3] - estimate_position
             if raw_normal @ to_camera < 0.0:
                 raw_normal *= -1.0
             if self.filtered_marker_normal is None:
@@ -284,7 +340,10 @@ class TongjiController:
             marker_normal = self.filtered_marker_normal.copy()
             normal_direction = -marker_normal
             direction = normal_direction / np.linalg.norm(normal_direction)
-            if c.align_marker_roll:
+            if c.upright_marker:
+                # Decoded ArUco corner 0 -> 1 points along marker +X.
+                preferred_x = marker_rotation[:, 0]
+            elif c.align_marker_roll:
                 marker_x = marker_rotation[:, 0]
                 current_x = T_BC_predicted[:3, 0] - (
                     T_BC_predicted[:3, 0] @ direction
@@ -303,7 +362,7 @@ class TongjiController:
                 center_direction @ direction, -1.0, 1.0
             )))
         T_BC_desired = desired_camera_pose(
-            estimate["position"],
+            estimate_position,
             direction,
             T_BC_predicted[:3, :3],
             c.standoff_m,
@@ -331,22 +390,33 @@ class TongjiController:
         elif inside_hold:
             self.motion_hold = True
             self.q_hold_target = q.copy()
-        twist = np.r_[
-            c.kp_linear * translation_error,
-            c.kp_angular * rotation_error,
-        ]
-        if self.motion_hold:
-            twist[:] = 0.0
-        # Translation feedforward follows the Tongji EKF velocity. The desired
-        # camera position moves with the target while preserving standoff.
+        twist = np.zeros(6)
         if not self.motion_hold:
-            twist[:3] += np.asarray(estimate["velocity"], dtype=float)
-        linear_speed = np.linalg.norm(twist[:3])
-        if linear_speed > c.max_cart_linear_m_s:
-            twist[:3] *= c.max_cart_linear_m_s / linear_speed
-        angular_speed = np.linalg.norm(twist[3:])
-        if angular_speed > c.max_cart_angular_rad_s:
-            twist[3:] *= c.max_cart_angular_rad_s / angular_speed
+            twist[3:] = c.kp_angular * rotation_error
+            if c.upright_marker:
+                twist[3:] += (
+                    c.angular_feedforward_gain * estimate_angular_velocity
+                )
+            angular_speed = np.linalg.norm(twist[3:])
+            if angular_speed > c.max_cart_angular_rad_s:
+                twist[3:] *= c.max_cart_angular_rad_s / angular_speed
+            if c.upright_marker:
+                # Control translation at the optical center, then express the
+                # requested velocity at the flange origin for its geometric Jacobian.
+                optical_axis = T_BC_predicted[:3, 2]
+                camera_to_center = estimate_position - T_BC_predicted[:3, 3]
+                reference = c.standoff_m * optical_axis
+                camera_error = camera_to_center - reference
+                lever = T_BC_predicted[:3, 3] - T_BE_predicted[:3, 3]
+                twist[:3] = (c.kp_linear * camera_error
+                             + c.linear_feedforward_gain * estimate_velocity
+                             - np.cross(twist[3:], reference + lever))
+            else:
+                twist[:3] = (c.kp_linear * translation_error
+                             + c.linear_feedforward_gain * estimate_velocity)
+            linear_speed = np.linalg.norm(twist[:3])
+            if linear_speed > c.max_cart_linear_m_s:
+                twist[:3] *= c.max_cart_linear_m_s / linear_speed
         if self.smoothed_twist is None:
             self.smoothed_twist = twist.copy()
         else:
@@ -391,13 +461,7 @@ class TongjiController:
                 c.max_joint_step_rad,
             )
         for candidate in (q_predicted, q_next):
-            if (
-                not np.isfinite(candidate).all()
-                or np.any(candidate < self.joint_lower)
-                or np.any(candidate > self.joint_upper)
-                or not self.workspace_ok(candidate)
-            ):
-                raise Fault("joint or workspace limit")
+            self._check_joint_and_workspace(candidate)
         self._check_jacobian_condition(q_next)
 
         self.q_plan = q_next
@@ -418,9 +482,18 @@ class TongjiController:
             "marker_normal": marker_normal,
             "normal_alignment_error_rad": normal_alignment_error,
             "motion_hold": self.motion_hold,
+            "static_target_locked": bool(
+                self.static_target_pose is not None
+                and self.static_target_since is not None
+                and now - self.static_target_since >= c.static_target_hold_s
+            ),
             "cartesian_twist": twist,
+            "target_position": estimate_position.copy(),
+            "target_velocity": estimate_velocity.copy(),
+            "target_angular_velocity": estimate_angular_velocity.copy(),
             "execution_time": execution_time,
             "visual_age": now - self.tracker.t,
+            "visual_receive_age": now - receive_time,
             "feedback_age": now - feedback_sample_time,
             "velocity_limited": bool(
                 np.any(abs(goal - jacobian.T @ np.linalg.solve(
@@ -443,6 +516,26 @@ class TongjiController:
                 "Nova5 Jacobian near singularity: "
                 f"min_sv={singular_values[-1]:.5f}"
             )
+
+    def _check_joint_and_workspace(self, q):
+        q = np.asarray(q, dtype=float)
+        if not np.isfinite(q).all():
+            raise Fault("joint target is non-finite")
+        lower = self.joint_lower + self.c.joint_limit_margin_rad
+        upper = self.joint_upper - self.c.joint_limit_margin_rad
+        violated = np.flatnonzero((q < lower) | (q > upper))
+        if len(violated):
+            details = []
+            for index in violated:
+                name = self.model.names[index]
+                details.append(
+                    f"{name}={np.rad2deg(q[index]):.2f} deg "
+                    f"allowed[{np.rad2deg(lower[index]):.2f},"
+                    f"{np.rad2deg(upper[index]):.2f}]"
+                )
+            raise Fault("joint limit margin: " + "; ".join(details))
+        if not self.workspace_ok(q):
+            raise Fault("TCP position outside configured workspace")
 
     def _shape_joint_goal(self, goal):
         c = self.c
